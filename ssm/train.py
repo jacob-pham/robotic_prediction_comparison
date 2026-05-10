@@ -8,15 +8,17 @@ from tqdm import tqdm
 from model import TrajectoryPredictor
 
 # ── Hyperparameters ──────────────────────────────────────────────────────────
-PROCESSED_DIR   = Path.cwd() / "datasets" / "processed"
-CHECKPOINT_DIR  = Path.cwd() / "ssm" / "checkpoints"
-LOSS_CURVE_PATH = Path.cwd() / "ssm" / "loss_curve.png"
+PROCESSED_DIR   = Path.cwd().parent / "datasets_processed" / "eth"
+CHECKPOINT_DIR  = Path.cwd() / "checkpoints"
 
 OBSERVE_LEN  = 8    # frames we observe (indices 0–7)
 PREDICT_LEN  = 12   # frames we predict (indices 8–19)
 BATCH_SIZE   = 64
-LEARNING_RATE = 1e-3
-NUM_EPOCHS   = 50
+LEARNING_RATE = 0.001
+NUM_EPOCHS   = 100
+
+SAVE_PATH = CHECKPOINT_DIR / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs_{NUM_EPOCHS}_best_model.pt"
+LOSS_CURVE_PATH = CHECKPOINT_DIR / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs_{NUM_EPOCHS}_loss_curve.png"
 
 
 def build_model_input(trajectory_tensor):
@@ -58,7 +60,7 @@ def run_one_epoch(model, data_loader, optimizer, is_training, device):
 
     for batch_trajectories in data_loader:
         # DataLoader wraps each batch in a list; unpack the single tensor
-        batch_trajectories = batch_trajectories[0].to(device)
+        batch_trajectories = batch_trajectories[0]
 
         model_input = build_model_input(batch_trajectories)  # zero out future
 
@@ -85,8 +87,8 @@ def main():
     print(f"Using device: {device}")
 
     # ── Load data ────────────────────────────────────────────────────────────
-    train_data = torch.load(PROCESSED_DIR / "train.pt")
-    val_data   = torch.load(PROCESSED_DIR / "val.pt")
+    train_data = torch.load(PROCESSED_DIR / "train.pt").to(device)
+    val_data   = torch.load(PROCESSED_DIR / "val.pt").to(device)
     print(f"Train trajectories: {train_data.shape[0]}  |  Val trajectories: {val_data.shape[0]}")
 
     # TensorDataset wraps a tensor so DataLoader can iterate over it in batches
@@ -104,21 +106,20 @@ def main():
     val_losses   = []
     best_val_loss = float("inf")
 
-    for epoch in tqdm(range(1, NUM_EPOCHS + 1), desc="Epochs"):
+    pbar = tqdm(range(1, NUM_EPOCHS + 1), desc="Training")
+    for epoch in pbar:
         train_loss = run_one_epoch(model, train_loader, optimizer, is_training=True,  device=device)
         val_loss   = run_one_epoch(model, val_loader,   optimizer, is_training=False, device=device)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
 
-        print(f"  Epoch {epoch:3d}/{NUM_EPOCHS}  |  train loss: {train_loss:.6f}  |  val loss: {val_loss:.6f}")
+        tqdm.write(f"Epoch {epoch}: train = {train_loss:.4f}, val = {val_loss:.4f}")
 
-        # Save the model whenever val loss improves
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            checkpoint_path = CHECKPOINT_DIR / "best_model.pt"
-            torch.save(model.state_dict(), checkpoint_path)
-            print(f"  New best val loss {best_val_loss:.6f} — checkpoint saved.")
+            torch.save(model.state_dict(), SAVE_PATH)
+            # tqdm.write(f"  new best val loss: {best_val_loss:.6f}")
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
@@ -129,7 +130,7 @@ def main():
     plt.plot(epochs, val_losses,   label="Val loss")
     plt.xlabel("Epoch")
     plt.ylabel("MSE loss")
-    plt.title("Training and validation loss")
+    plt.title(f"Training and validation loss - lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs{NUM_EPOCHS}")
     plt.legend()
     plt.tight_layout()
     plt.savefig(LOSS_CURVE_PATH)

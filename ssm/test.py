@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,14 +8,18 @@ from torch.utils.data import DataLoader, TensorDataset
 from model import TrajectoryPredictor
 
 # ── Paths and constants ───────────────────────────────────────────────────────
-PROCESSED_DIR    = Path.cwd() / "datasets" / "processed"
-CHECKPOINT_PATH  = Path.cwd() / "ssm" / "checkpoints" / "best_model.pt"
-PREDICTIONS_PATH = Path.cwd() / "predictions.png"
+BATCH_SIZE   = 64
+LEARNING_RATE = 0.01
+NUM_EPOCHS   = 100
+
+PROCESSED_DIR    = Path.cwd().parent / "datasets_processed" / "eth"
+CHECKPOINT_PATH  = Path.cwd() / "checkpoints" / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs_{NUM_EPOCHS}_best_model.pt"
+PREDICTIONS_PATH = Path.cwd() / "checkpoints" / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs_{NUM_EPOCHS}_predictions.png"
 
 OBSERVE_LEN = 8    # frames we observe (indices 0–7)
 PREDICT_LEN = 12   # frames we predict (indices 8–19)
-BATCH_SIZE  = 64
-NUM_PLOT    = 5    # how many example trajectories to plot
+
+NUM_PLOT    = 10    # how many example trajectories to plot
 
 
 def build_model_input(trajectory_tensor):
@@ -86,9 +91,12 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
     total          = all_predictions.shape[0]
     chosen_indices = np.random.choice(total, size=num_examples, replace=False)
 
-    fig, axes = plt.subplots(1, num_examples, figsize=(4 * num_examples, 4))
-    if num_examples == 1:
-        axes = [axes]   # make iterable when there's only one subplot
+    # Arrange subplots in a roughly square grid
+    n_cols = int(np.ceil(np.sqrt(num_examples)))
+    n_rows = int(np.ceil(num_examples / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+    axes = np.atleast_1d(axes).flatten()
 
     for plot_idx, traj_idx in enumerate(chosen_indices):
         predicted_traj = all_predictions[traj_idx].numpy()   # (20, 2)
@@ -113,7 +121,11 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
         ax.legend(fontsize=7)
         ax.set_aspect("equal")
 
-    plt.suptitle("Predicted vs ground-truth trajectories (agent-centric)", y=1.02)
+    # Hide any unused subplots in the grid
+    for extra_idx in range(num_examples, len(axes)):
+        axes[extra_idx].axis("off")
+
+    plt.suptitle(f"Predicted vs ground-truth trajectories - lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs_{NUM_EPOCHS}", y=1.02)
     plt.tight_layout()
     plt.savefig(PREDICTIONS_PATH, bbox_inches="tight")
     print(f"Prediction plot saved to {PREDICTIONS_PATH}")
