@@ -1,0 +1,1 @@
+git commit - initial ssm - predicting position with poor results (ok on linear walking targets) - 2x residual blocks (LN -> S4D, LN -> FFN 64-128-64 GELU); Linear 2 -> 64 in, 64 -> 2 out

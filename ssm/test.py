@@ -7,9 +7,9 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from model import TrajectoryPredictor
 
-# ── Paths and constants ───────────────────────────────────────────────────────
-BATCH_SIZE   = 64
-LEARNING_RATE = 0.01
+# Paths and constants 
+BATCH_SIZE   = 512
+LEARNING_RATE = 0.003
 NUM_EPOCHS   = 100
 
 PROCESSED_DIR    = Path.cwd().parent / "datasets_processed" / "eth"
@@ -19,13 +19,19 @@ PREDICTIONS_PATH = Path.cwd() / "checkpoints" / f"lr_{LEARNING_RATE}_batch_{BATC
 OBSERVE_LEN = 8    # frames we observe (indices 0–7)
 PREDICT_LEN = 12   # frames we predict (indices 8–19)
 
-NUM_PLOT    = 10    # how many example trajectories to plot
+NUM_PLOT    = 9    # how many example trajectories to plot
 
 
 def build_model_input(trajectory_tensor):
-    """Zero out the 12 future timesteps, same as in train.py."""
-    model_input = trajectory_tensor.clone()
-    model_input[:, OBSERVE_LEN:, :] = 0.0
+    """Build the model input from a full trajectory tensor (same as train.py).
+
+    Feeds observed step-to-step displacements at indices 1..OBSERVE_LEN-1
+    and zeros everywhere else.
+    """
+    model_input = torch.zeros_like(trajectory_tensor)
+    model_input[:, 1:OBSERVE_LEN, :] = (
+        trajectory_tensor[:, 1:OBSERVE_LEN, :] - trajectory_tensor[:, :OBSERVE_LEN - 1, :]
+    )
     return model_input
 
 
@@ -72,7 +78,19 @@ def get_all_predictions(model, test_data, device):
         for (batch_trajectories,) in test_loader:
             batch_trajectories = batch_trajectories.to(device)
             model_input        = build_model_input(batch_trajectories)
-            predictions        = model(model_input)
+            raw_output         = model(model_input)
+
+            # Model outputs step-to-step displacements for the future steps.
+            # Rebuild absolute positions by cumulatively summing those
+            # displacements onto the last observed position.
+            last_observed_pos = batch_trajectories[:, OBSERVE_LEN - 1:OBSERVE_LEN, :]   # (B, 1, 2)
+            predicted_deltas  = raw_output[:, OBSERVE_LEN:, :]                          # (B, 12, 2)
+            predicted_future  = last_observed_pos + predicted_deltas.cumsum(dim=1)      # (B, 12, 2)
+
+            # Assemble a full (B, 20, 2) trajectory so downstream code
+            # (ADE/FDE, plotting) sees absolute positions everywhere.
+            predictions = batch_trajectories.clone()
+            predictions[:, OBSERVE_LEN:, :] = predicted_future
 
             all_predictions.append(predictions.cpu())
             all_ground_truth.append(batch_trajectories.cpu())
@@ -88,7 +106,9 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
     Shows the 8 observed steps (shared), the 12 ground-truth future steps,
     and the 12 predicted future steps.
     """
-    total          = all_predictions.shape[0]
+    total = all_predictions.shape[0]
+    random_seed = 41
+    np.random.seed(random_seed)
     chosen_indices = np.random.choice(total, size=num_examples, replace=False)
 
     # Arrange subplots in a roughly square grid
@@ -135,11 +155,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # ── Load test data ────────────────────────────────────────────────────────
+    #  Load test data 
     test_data = torch.load(os.path.join(PROCESSED_DIR, "test.pt"))
     print(f"Test trajectories: {test_data.shape[0]}")
 
-    # ── Load model checkpoint ─────────────────────────────────────────────────
+    #  Load model checkpoint 
     if not os.path.exists(CHECKPOINT_PATH):
         print(f"ERROR: No checkpoint found at {CHECKPOINT_PATH}")
         print("Run train.py first to generate a checkpoint.")
@@ -149,10 +169,10 @@ def main():
     model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
     print(f"Loaded checkpoint from {CHECKPOINT_PATH}")
 
-    # ── Get predictions for the whole test set ────────────────────────────────
+    #  Get predictions for the whole test set 
     all_predictions, all_ground_truth = get_all_predictions(model, test_data, device)
 
-    # ── Compute ADE and FDE ───────────────────────────────────────────────────
+    #  Compute ADE and FDE 
     predicted_future = all_predictions[:, OBSERVE_LEN:, :]    # (N, 12, 2)
     true_future      = all_ground_truth[:, OBSERVE_LEN:, :]   # (N, 12, 2)
 
@@ -163,7 +183,7 @@ def main():
     print(f"  ADE (avg L2 over 12 steps): {ade:.4f} m")
     print(f"  FDE (L2 at final step):     {fde:.4f} m")
 
-    # ── Plot example predictions ──────────────────────────────────────────────
+    #  Plot example predictions 
     plot_examples(all_predictions, all_ground_truth, num_examples=NUM_PLOT)
 
 

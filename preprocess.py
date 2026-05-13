@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # ── Parameters ──────────────────────────────────────────────────────────────
 # Path to the leave-one-out fold we're using (held-out scene = eth)
-scene_name = "eth"
+scene_name = "zara2"
 DATA_ROOT = Path.cwd() / "datasets" / scene_name
 
 # Where to write the processed tensors
