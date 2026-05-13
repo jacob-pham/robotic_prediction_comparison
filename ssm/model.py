@@ -37,8 +37,13 @@ class TrajectoryPredictor(nn.Module):
          approximately linear and cannot fit nonlinear motion patterns.
       3. Output projection: Linear(HIDDEN_DIM -> 2)
 
-    Input:  (batch, 20, 2) — timesteps 0-7 observed, 8-19 zeroed
-    Output: (batch, 20, 2) — loss computed only on timesteps 8-19
+    Input:  (batch, 20, 2) — step-to-step displacements (velocities).
+            Index 0 is zero (no prior frame), indices 1-7 are the
+            observed deltas, indices 8-19 are zeroed (the model rolls
+            out from its internal state).
+    Output: (batch, 20, 2) — at timesteps 8-19, the values are step-to-step
+            displacements (delta from the previous frame), not absolute
+            positions. Loss is computed only on timesteps 8-19.
     """
 
     def __init__(self):
@@ -96,7 +101,7 @@ class TrajectoryPredictor(nn.Module):
         return predicted_sequence
 
 
-if __name__ == "__main__":
+def main():
     print("Running forward pass on dummy batch...")
 
     model      = TrajectoryPredictor()
@@ -110,3 +115,7 @@ if __name__ == "__main__":
     print(f"  Output shape: {output.shape}")
     print(f"  Total params: {sum(p.numel() for p in model.parameters()):,}")
     print("Shape check passed!")
+
+
+if __name__ == "__main__":
+    main()

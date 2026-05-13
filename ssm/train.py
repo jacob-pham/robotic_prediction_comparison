@@ -7,14 +7,14 @@ from tqdm import tqdm
 
 from model import TrajectoryPredictor
 
-# ── Hyperparameters ──────────────────────────────────────────────────────────
+# Hyperparameters 
 PROCESSED_DIR   = Path.cwd().parent / "datasets_processed" / "eth"
 CHECKPOINT_DIR  = Path.cwd() / "checkpoints"
 
 OBSERVE_LEN  = 8    # frames we observe (indices 0–7)
 PREDICT_LEN  = 12   # frames we predict (indices 8–19)
-BATCH_SIZE   = 64
-LEARNING_RATE = 0.001
+BATCH_SIZE   = 512
+LEARNING_RATE = 0.003
 NUM_EPOCHS   = 100
 
 SAVE_PATH = CHECKPOINT_DIR / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epochs_{NUM_EPOCHS}_best_model.pt"
@@ -22,26 +22,52 @@ LOSS_CURVE_PATH = CHECKPOINT_DIR / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epoch
 
 
 def build_model_input(trajectory_tensor):
-    """Zero out the future 12 timesteps so the model only sees past observations.
+    """Build the model input from a full trajectory tensor.
 
-    trajectory_tensor: (N, 20, 2) — full ground-truth trajectories
-    returns:           (N, 20, 2) — observed steps kept, future steps set to 0
+    Feeds step-to-step displacements (velocities) at the observed
+    timesteps instead of raw positions. The model's job is then to
+    extrapolate the recent velocity rather than infer it from positions.
+
+    trajectory_tensor: (N, 20, 2) — full ground-truth trajectories (positions)
+    returns:           (N, 20, 2) — observed deltas at indices 1..OBSERVE_LEN-1,
+                                    zeros at index 0 and indices OBSERVE_LEN..19
     """
-    model_input = trajectory_tensor.clone()
-    model_input[:, OBSERVE_LEN:, :] = 0.0   # blank out timesteps 8–19
+    model_input = torch.zeros_like(trajectory_tensor)
+    # Observed deltas: position[t] - position[t-1] for t in 1..OBSERVE_LEN-1
+    model_input[:, 1:OBSERVE_LEN, :] = (
+        trajectory_tensor[:, 1:OBSERVE_LEN, :] - trajectory_tensor[:, :OBSERVE_LEN - 1, :]
+    )
     return model_input
 
 
 def compute_loss(predictions, ground_truth):
-    """MSE loss computed only on the 12 predicted future timesteps (indices 8–19).
+    """MSE loss on step-to-step displacements for the 12 future timesteps.
 
-    predictions:  (batch, 20, 2) — full model output
-    ground_truth: (batch, 20, 2) — full ground-truth trajectory
+    The model output at indices 8-19 is interpreted as the displacement
+    from the previous frame, not an absolute position. So the target at
+    index t is ground_truth[t] - ground_truth[t-1] for t in 8..19.
+
+    predictions:  (batch, 20, 2) — full model output (future slots are deltas)
+    ground_truth: (batch, 20, 2) — full ground-truth trajectory (positions)
     """
-    predicted_future = predictions[:, OBSERVE_LEN:, :]     # (batch, 12, 2)
-    true_future      = ground_truth[:, OBSERVE_LEN:, :]    # (batch, 12, 2)
-    return nn.functional.mse_loss(predicted_future, true_future)
+    predicted_deltas = predictions[:, OBSERVE_LEN:, :]                                          # (batch, 12, 2)
+    target_deltas    = ground_truth[:, OBSERVE_LEN:, :] - ground_truth[:, OBSERVE_LEN - 1:-1, :]  # (batch, 12, 2)
+    return nn.functional.mse_loss(predicted_deltas, target_deltas)
 
+def check_for_stopping_criterion(epoch, val_loss, val_losses):
+    """Example stopping criterion: stop if val loss doesn't improve for 10 epochs."""
+
+    if epoch < 10:
+        return False  # Don't stop in the first 10 epochs
+    
+    # use relative improvement
+    # if val_loss has not improved by at least 1% compared to the best val loss in the last 10 epochs, stop
+    recent_val_losses = val_losses[-10:]
+    best_recent_val_loss = min(recent_val_losses)
+    if (best_recent_val_loss - val_loss) / best_recent_val_loss < 0.01:
+        return True  # Stop if no significant improvement
+    else:
+        return False  # Continue training
 
 def run_one_epoch(model, data_loader, optimizer, is_training, device):
     """Run one full pass over the data (train or val).
@@ -120,6 +146,9 @@ def main():
             best_val_loss = val_loss
             torch.save(model.state_dict(), SAVE_PATH)
             # tqdm.write(f"  new best val loss: {best_val_loss:.6f}")
+        if check_for_stopping_criterion(epoch, val_loss, val_losses):
+            tqdm.write(f"Stopping early at epoch {epoch} due to no significant improvement in val loss.")
+            break
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
