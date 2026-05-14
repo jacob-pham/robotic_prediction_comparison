@@ -1,4 +1,6 @@
 /__pycache__/
 /.claude/
-/ssm//__pycache__/
+/ssm/__pycache__/
 *.pyc
+
+
