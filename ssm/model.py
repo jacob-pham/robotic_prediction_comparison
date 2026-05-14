@@ -13,13 +13,12 @@ except ImportError:
     )
     sys.exit(1)
 
-# ── Architecture constants ────────────────────────────────────────────────
-INPUT_DIM     = 2
-HIDDEN_DIM    = 64
-STATE_DIM     = 64
-OUTPUT_DIM    = 2
-NUM_LAYERS    = 2
-FF_EXPANSION  = 2     # feedforward layer expands hidden dim by this factor
+INPUT_DIM = 2
+HIDDEN_DIM = 64
+STATE_DIM = 64
+OUTPUT_DIM = 2
+NUM_LAYERS = 2
+FF_EXPANSION = 2  # feedforward layer expands hidden dim by this factor
 
 
 class TrajectoryPredictor(nn.Module):
@@ -87,14 +86,14 @@ class TrajectoryPredictor(nn.Module):
             self.feedforwards,
         ):
             # Sub-block 1: S4D with pre-norm and residual
-            normed     = norm_s4d(hidden)
-            s4d_output = s4d_layer(normed)[0]   # S4D returns (output, state)
-            hidden     = hidden + s4d_output
+            normed = norm_s4d(hidden)
+            s4d_output = s4d_layer(normed)[0]  # S4D returns (output, state)
+            hidden = hidden + s4d_output
 
             # Sub-block 2: feedforward with pre-norm and residual
-            normed    = norm_ff(hidden)
+            normed = norm_ff(hidden)
             ff_output = feedforward(normed)
-            hidden    = hidden + ff_output
+            hidden = hidden + ff_output
 
         predicted_sequence = self.output_projection(hidden)
 
@@ -104,12 +103,12 @@ class TrajectoryPredictor(nn.Module):
 def main():
     print("Running forward pass on dummy batch...")
 
-    model      = TrajectoryPredictor()
+    model = TrajectoryPredictor()
     batch_size = 4
-    seq_len    = 20
+    seq_len = 20
 
     dummy_input = torch.randn(batch_size, seq_len, INPUT_DIM)
-    output      = model(dummy_input)
+    output = model(dummy_input)
 
     print(f"  Input shape:  {dummy_input.shape}")
     print(f"  Output shape: {output.shape}")
