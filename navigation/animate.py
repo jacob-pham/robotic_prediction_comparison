@@ -41,13 +41,11 @@ FPS = 6
 BITRATE = 1800  # mp4 bitrate
 DPI = 120  # render dpi for the saved animation
 SHOW_PREDICTIONS = True  # red dashed line — predicted future from current step
-SHOW_OBSERVED = True  # faint black observed history per pedestrian
-SHOW_OBSTACLES = True  # red X markers — obstacles the controller used
 AXIS_PAD = 1.5  # meters of padding around the data bounding box
 
 
 def compute_axis_limits(start, goal, ego_positions, ped_positions, ped_mask,
-                        predicted_positions, observed_positions):
+                        predicted_positions):
     """Bounding box around everything we plot, plus padding."""
     xs = [start[0], goal[0]]
     ys = [start[1], goal[1]]
@@ -59,9 +57,6 @@ def compute_axis_limits(start, goal, ego_positions, ped_positions, ped_mask,
     if predicted_positions.size:
         xs.extend(predicted_positions.reshape(-1, 2)[:, 0].tolist())
         ys.extend(predicted_positions.reshape(-1, 2)[:, 1].tolist())
-    if observed_positions.size:
-        xs.extend(observed_positions.reshape(-1, 2)[:, 0].tolist())
-        ys.extend(observed_positions.reshape(-1, 2)[:, 1].tolist())
     return (min(xs) - AXIS_PAD, max(xs) + AXIS_PAD), (min(ys) - AXIS_PAD, max(ys) + AXIS_PAD)
 
 
@@ -97,10 +92,8 @@ def main():
     goal = data["goal"]  # (2,)
     ped_positions = data["pedestrian_positions"]  # (T+1, P, 2)
     ped_mask = data["pedestrian_mask"]  # (T+1, P)
-    observed_positions = data["pedestrian_observed"]  # (P, OBSERVE_LEN, 2)
-    predicted_positions = data["predicted_positions"]  # (P, H, 2)
-    obstacle_positions = data["obstacle_positions"]  # (T, P, 2)
-    obstacle_mask = data["obstacle_mask"]  # (T, P)
+    step_predicted_positions = data["step_predicted_positions"]  # (T, P_obs, H, 2)
+    step_predicted_mask = data["step_predicted_mask"]  # (T, P_obs)
 
     metadata = {}
     if METADATA_FILE.exists():
@@ -109,15 +102,19 @@ def main():
 
     num_frames = ego_positions.shape[0]  # T + 1
     num_peds = ped_positions.shape[1]  # display axis (all peds in scene)
-    num_anchor_peds = observed_positions.shape[0]  # anchor cohort axis
-    horizon = predicted_positions.shape[1]
+    num_obs_peds = step_predicted_positions.shape[1]  # union of peds seen as obstacles
+    horizon = step_predicted_positions.shape[2]
 
     print(f"Loaded rollout: {num_frames} frames, {num_peds} pedestrians on "
-          f"display, {num_anchor_peds} with full history, horizon {horizon}")
+          f"display, {num_obs_peds} obstacle peds, horizon {horizon}")
 
+    # Bounding box: include any predicted point from any step (NaN-safe).
+    if step_predicted_mask.any():
+        valid_preds = step_predicted_positions[step_predicted_mask]
+    else:
+        valid_preds = np.zeros((0, 2), dtype=np.float32)
     xlim, ylim = compute_axis_limits(
-        start, goal, ego_positions, ped_positions, ped_mask,
-        predicted_positions, observed_positions if SHOW_OBSERVED else np.zeros((0, 0, 2)),
+        start, goal, ego_positions, ped_positions, ped_mask, valid_preds,
     )
 
     fig, ax = plt.subplots(figsize=(10, 7))
@@ -131,33 +128,28 @@ def main():
     ax.set_title(f"Navigation rollout - {scene} (anchor frame {anchor})")
     ax.grid(True, alpha=0.3)
 
-    # Static items: start, goal, and (optionally) observed histories.
+    # Static items: start and goal.
     ax.plot(start[0], start[1], "bs", markersize=10, label="Start")
     ax.plot(goal[0],  goal[1],  "b*", markersize=16, label="Goal")
-
-    if SHOW_OBSERVED:
-        for i in range(num_anchor_peds):
-            hist = observed_positions[i]
-            ax.plot(hist[:, 0], hist[:, 1], "-",
-                    color="0.6", linewidth=0.8, alpha=0.5,
-                    label="Observed history" if i == 0 else None)
 
     # Dynamic artists, updated each frame.
     ego_path_line, = ax.plot([], [], "b-", linewidth=2.0, label="Ego path")
     ego_dot,        = ax.plot([], [], "bo", markersize=11, label="Ego")
     peds_dots,      = ax.plot([], [], "ko", markersize=6,  label="Pedestrians")
 
+    # One line per obstacle slot — we update its data each frame from the
+    # per-step predictions saved by the simulator. Slots that have no
+    # prediction at a given step are blanked out.
+    # Dashed segments connect successive predicted steps, and a marker at
+    # each vertex makes it easy to count off the 8 future positions.
     pred_lines = []
     if SHOW_PREDICTIONS:
-        for i in range(num_anchor_peds):
-            line, = ax.plot([], [], "r--", linewidth=0.9, alpha=0.55,
+        for i in range(num_obs_peds):
+            line, = ax.plot([], [], linestyle="--", color="red",
+                            marker="o", markersize=3,
+                            linewidth=0.9, alpha=0.6,
                             label="Predicted future" if i == 0 else None)
             pred_lines.append(line)
-
-    obs_dots = None
-    if SHOW_OBSTACLES:
-        obs_dots, = ax.plot([], [], "rx", markersize=8, alpha=0.8,
-                            label="Obstacle (controller)")
 
     step_text = ax.text(0.02, 0.97, "", transform=ax.transAxes, va="top",
                         fontsize=10, family="monospace")
@@ -165,6 +157,8 @@ def main():
                         fontsize=10, family="monospace")
 
     ax.legend(loc="lower right", fontsize=8)
+
+    num_pred_steps = step_predicted_positions.shape[0]  # T (one shorter than ego_positions)
 
     def update(t):
         # Ego: path up to and including step t, plus a marker at current pos.
@@ -175,30 +169,22 @@ def main():
         m = ped_mask[t]
         peds_dots.set_data(ped_positions[t, m, 0], ped_positions[t, m, 1])
 
-        # Predicted future: predictions were made once at anchor (t=0), so
-        # at sim step t the still-relevant horizon is offsets [t..H-1].
+        # Predicted future: re-predicted at every control step. Index t into
+        # the per-step predictions; the last frame (t == num_pred_steps) has
+        # no controller action, so we just blank the prediction lines.
         if SHOW_PREDICTIONS:
-            for i, line in enumerate(pred_lines):
-                if t < horizon:
-                    line.set_data(
-                        predicted_positions[i, t:, 0],
-                        predicted_positions[i, t:, 1],
-                    )
-                else:
-                    line.set_data([], [])
-
-        # Obstacle markers used during the t-th control step. obstacle_*
-        # arrays are indexed 0..T-1 (one shorter than ego_positions), so the
-        # final frame just shows the ego at the goal with no obstacle markers.
-        if obs_dots is not None:
-            if t < obstacle_positions.shape[0]:
-                mo = obstacle_mask[t]
-                obs_dots.set_data(
-                    obstacle_positions[t, mo, 0],
-                    obstacle_positions[t, mo, 1],
-                )
+            if t < num_pred_steps:
+                for i, line in enumerate(pred_lines):
+                    if step_predicted_mask[t, i]:
+                        line.set_data(
+                            step_predicted_positions[t, i, :, 0],
+                            step_predicted_positions[t, i, :, 1],
+                        )
+                    else:
+                        line.set_data([], [])
             else:
-                obs_dots.set_data([], [])
+                for line in pred_lines:
+                    line.set_data([], [])
 
         dt = metadata.get("dt_seconds", 0.4)
         step_text.set_text(f"step {t}/{num_frames - 1}")
@@ -206,8 +192,6 @@ def main():
 
         artists = [ego_path_line, ego_dot, peds_dots, step_text, time_text]
         artists.extend(pred_lines)
-        if obs_dots is not None:
-            artists.append(obs_dots)
         return artists
 
     anim = animation.FuncAnimation(

@@ -10,21 +10,23 @@
   "max_speed": 1.3,
   "k_att": 1.0,
   "k_rep": 2.5,
+  "predict_horizon": 8,
+  "gamma": 0.8,
   "influence_radius": 2.0,
   "goal_tolerance": 0.4,
-  "max_sim_steps": 80,
+  "max_sim_steps": 200,
   "anchor_frame": 1040,
-  "num_steps_done": 48,
-  "num_pedestrians": 46,
-  "num_obstacle_pedestrians": 73,
+  "num_steps_done": 61,
+  "num_pedestrians": 30,
+  "num_obstacle_pedestrians": 67,
   "re_predict_every_step": true,
   "reached_goal": true,
   "start": [
-    3.0,
+    -1.0,
     1.0
   ],
   "goal": [
-    13.0,
-    13.0
+    11.0,
+    18.0
   ]
 }

@@ -2,22 +2,27 @@
 
 The ego is modeled as a single integrator: position updates by velocity * dt.
 At each step, the velocity is the sum of an attractive force toward the goal
-and repulsive forces away from nearby obstacles.
+and repulsive forces away from predicted obstacle positions over a short
+future horizon. Each future step k contributes gamma^k * phi(ego, o_hat_{t+k}),
+where phi is the standard 1/dist repulsive kernel.
 """
 import numpy as np
 
 
-def compute_velocity(ego_pos, goal, obstacles,
-                     k_att, k_rep, influence_radius, max_speed):
+def compute_velocity(ego_pos, goal, obstacle_predictions,
+                     k_att, k_rep, influence_radius, max_speed, gamma):
     """Return a velocity vector (2,) for the current step.
 
-    ego_pos:          (2,) current ego position in global coords
-    goal:             (2,) goal position in global coords
-    obstacles:        list of (2,) arrays — obstacle positions at this step
-    k_att:            attractive gain
-    k_rep:            repulsive gain
-    influence_radius: obstacles only push the ego when they are closer than this
-    max_speed:        velocity magnitude is clipped to this
+    ego_pos:              (2,) current ego position in global coords
+    goal:                 (2,) goal position in global coords
+    obstacle_predictions: (P, H, 2) array — for each of P obstacles, H predicted
+                          future positions o_hat_{t+1..t+H}. Pass shape (0, H, 2)
+                          when there are no obstacles.
+    k_att:                attractive gain
+    k_rep:                repulsive gain
+    influence_radius:     obstacles only push the ego when closer than this
+    max_speed:            velocity magnitude is clipped to this
+    gamma:                discount factor in (0, 1] applied per future step
     """
     # Attractive: unit vector toward the goal, scaled by gain.
     to_goal = goal - ego_pos
@@ -27,15 +32,39 @@ def compute_velocity(ego_pos, goal, obstacles,
     else:
         attractive = k_att * to_goal / dist_goal
 
-    # Repulsive: sum contributions from each close obstacle.
+    # Repulsive: discounted sum over the prediction horizon, fully vectorized.
     repulsive = np.zeros(2)
-    for obs in obstacles:
-        diff = ego_pos - obs
-        dist = np.linalg.norm(diff)
-        if 1e-6 < dist < influence_radius:
-            # Standard potential field form: blows up as dist -> 0, zero at the boundary.
-            magnitude = k_rep * (1.0 / dist - 1.0 / influence_radius) / (dist * dist)
-            repulsive += magnitude * (diff / dist)
+    if obstacle_predictions.size > 0:
+        # diff[p, k] = ego_pos - o_hat_{t+k}   shape (P, H, 2)
+        diff = ego_pos - obstacle_predictions
+        dist = np.linalg.norm(diff, axis=-1)              # (P, H)
+
+        # Only obstacles strictly inside the influence radius push the ego.
+        # The lower bound guards divide-by-zero when an obstacle lands on top
+        # of the ego.
+        active = (dist > 1e-6) & (dist < influence_radius)
+
+        # Replace inactive distances with 1.0 so the math below is finite;
+        # the contribution is zeroed out via the active mask afterwards.
+        safe_dist = np.where(active, dist, 1.0)
+
+        # Standard potential field magnitude: blows up as dist -> 0, zero at
+        # the boundary.
+        magnitude = k_rep * (1.0 / safe_dist - 1.0 / influence_radius) / (safe_dist * safe_dist)
+
+        # Unit vector from each predicted obstacle position toward the ego.
+        unit = diff / safe_dist[..., None]                # (P, H, 2)
+
+        # Discount weights gamma^k for k = 1..H.
+        horizon = obstacle_predictions.shape[1]
+        weights = gamma ** np.arange(1, horizon + 1, dtype=np.float64)  # (H,)
+
+        # Combine: mask out inactive entries, apply gamma^k, sum over both
+        # obstacles and horizon steps.
+        force = magnitude[..., None] * unit               # (P, H, 2)
+        force = force * active[..., None]                 # zero where inactive
+        force = force * weights[None, :, None]            # gamma^k weighting
+        repulsive = force.sum(axis=(0, 1))
 
     velocity = attractive + repulsive
 

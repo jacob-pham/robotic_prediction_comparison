@@ -37,19 +37,25 @@ FRAME_STEP = 10       # raw video frames per trajectory step (dataset convention
 DT_SECONDS = 0.4      # seconds per trajectory step
 
 # Controller gains
-K_ATT = 1.0
-K_REP = 2.5
-INFLUENCE_RADIUS = 2.0
-MAX_SPEED = 1.3
-GOAL_TOLERANCE = 0.4
+K_ATT = 1.0 # attractive potential gain toward the goal
+K_REP = 2.5 # repulsive potential gain away from predicted obstacles
+INFLUENCE_RADIUS = 2.0 # obstacles only push the ego when closer than this (meters)
+MAX_SPEED = 1.3 # max ego speed (m/s) — the controller's output velocity is clipped to this
+GOAL_TOLERANCE = 0.4 # ego is considered to have reached the goal if within this distance (meters)
+
+# Horizon-weighted repulsive potential: at each control step, use the first
+# PREDICT_HORIZON predicted future positions per obstacle, discounted by gamma^k.
+PREDICT_HORIZON = 8
+GAMMA = 0.8
 
 # Ego start/goal in scene coordinates (meters)
-EGO_START = np.array([3.0, 1.0])
-EGO_GOAL = np.array([13.0, 13.0])
-MAX_SIM_STEPS = 80
+EGO_START = np.array([-1.0, 1.0])
+EGO_GOAL = np.array([11.0, 18.0])
+MAX_SIM_STEPS = 200
 
-# Pedestrian thinning
-KEEP_N_PEDS = None    # None means keep every ped present in the rollout window
+# Pedestrian thinning. Fraction of eligible peds (those present somewhere in
+# the rollout window) to keep. None means keep all of them.
+KEEP_PED_FRACTION = 0.75 # (0,1]
 RANDOM_SEED = 0
 ANCHOR_FRAME = None   # None means auto-pick the densest frame
 
@@ -200,20 +206,59 @@ def predict_pedestrians(model, observed, device):
     return {pid: predicted_abs[i] for i, pid in enumerate(ped_ids)}
 
 
+def get_partial_history(ped_index, pid, current_frame, frame_step, observe_len):
+    """Return whatever observed history is available for a ped at current_frame.
+
+    Walks back from current_frame collecting up to observe_len consecutive
+    samples; stops at the first missing frame. Returns array (k, 2) in
+    chronological order, or None if the ped is not present at current_frame.
+    """
+    fmap = ped_index[pid]
+    if current_frame not in fmap:
+        return None
+    samples = [fmap[current_frame]]
+    for k in range(1, observe_len):
+        frame = current_frame - k * frame_step
+        if frame not in fmap:
+            break
+        samples.append(fmap[frame])
+    samples.reverse()
+    return np.stack(samples, axis=0)
+
+
+def constant_velocity_predict(history, horizon):
+    """Predict horizon future positions by repeating the last step delta.
+
+    With only one observed frame, predicts zero motion (ped stays put).
+    Output shape is (horizon, 2), matching the SSM's per-step output shape.
+    """
+    last_pos = history[-1]
+    if len(history) >= 2:
+        velocity = history[-1] - history[-2]
+    else:
+        velocity = np.zeros_like(last_pos)
+    steps = np.arange(1, horizon + 1, dtype=np.float32).reshape(-1, 1)
+    return last_pos[None, :] + velocity[None, :] * steps
+
+
 # ---------------------------------------------------------------------------
 # Pedestrian thinning and display arrays
 # ---------------------------------------------------------------------------
-def subsample_pedestrians(ped_index, n, seed, rollout_frames):
-    """Randomly keep at most n pedestrians that appear in the rollout window.
+def subsample_pedestrians(ped_index, fraction, seed, rollout_frames):
+    """Randomly keep a fraction of pedestrians that appear in the rollout window.
 
     Drop anyone never present during the simulation horizon first, then
-    sample n from what's left. This makes KEEP_N_PEDS a meaningful budget
-    instead of burning slots on peds from a different part of the recording.
+    sample round(fraction * len(eligible)) from what's left. fraction is a
+    float in (0, 1]; a value >= 1 (or None) keeps every eligible ped.
     """
     eligible = [pid for pid, fmap in ped_index.items()
                 if not rollout_frames.isdisjoint(fmap.keys())]
-    if n is None or n >= len(eligible):
+    if fraction is None or fraction >= 1.0:
         return {pid: ped_index[pid] for pid in eligible}
+    n = int(round(fraction * len(eligible)))
+    n = max(0, min(n, len(eligible)))
+    if n == 0:
+        return {}
     rng = np.random.default_rng(seed)
     chosen = rng.choice(eligible, size=n, replace=False)
     return {pid: ped_index[pid] for pid in chosen}
@@ -253,6 +298,7 @@ def simulate_ego(start, goal, model, device, ped_index, anchor):
     positions = [ego_pos.copy()]
     velocities = []
     obstacle_per_step = []
+    predictions_per_step = []   # per-step {pid: (H, 2)} for the animation
     reached = False
 
     for step in range(MAX_SIM_STEPS):
@@ -264,13 +310,37 @@ def simulate_ego(start, goal, model, device, ped_index, anchor):
         observed_now = get_observed(ped_index, current_frame, FRAME_STEP, OBSERVE_LEN)
         predicted_now = predict_pedestrians(model, observed_now, device)
 
+        # Constant-velocity fallback for peds present at this frame but lacking
+        # a full OBSERVE_LEN history (new entrants the SSM can't take as input).
+        # Keeps every visible ped in the prediction set so the controller and
+        # the animation see them too.
+        for pid in ped_index:
+            if pid in predicted_now:
+                continue
+            history = get_partial_history(ped_index, pid, current_frame,
+                                          FRAME_STEP, OBSERVE_LEN)
+            if history is None:
+                continue
+            predicted_now[pid] = constant_velocity_predict(history, PREDICT_HORIZON)
+
         step_obstacles = {pid: pred[0] for pid, pred in predicted_now.items()}
         obstacle_per_step.append(step_obstacles)
 
-        obstacles = list(step_obstacles.values())
+        # Keep each ped's horizon prediction for this step so the animation
+        # can show the future the controller is actually reacting to.
+        step_predictions = {pid: pred[:PREDICT_HORIZON] for pid, pred in predicted_now.items()}
+        predictions_per_step.append(step_predictions)
+
+        # Stack each obstacle's first PREDICT_HORIZON predicted positions into
+        # a (P, H, 2) array for the horizon-weighted repulsive potential.
+        if step_predictions:
+            horizon_array = np.stack(list(step_predictions.values()), axis=0).astype(np.float64)
+        else:
+            horizon_array = np.zeros((0, PREDICT_HORIZON, 2), dtype=np.float64)
+
         velocity = compute_velocity(
-            ego_pos, goal, obstacles,
-            K_ATT, K_REP, INFLUENCE_RADIUS, MAX_SPEED,
+            ego_pos, goal, horizon_array,
+            K_ATT, K_REP, INFLUENCE_RADIUS, MAX_SPEED, GAMMA,
         )
         velocities.append(velocity.copy())
         ego_pos = ego_pos + velocity * DT_SECONDS
@@ -289,11 +359,19 @@ def simulate_ego(start, goal, model, device, ped_index, anchor):
     num_steps = len(velocities)
     obstacle_positions = np.full((num_steps, num_obs_peds, 2), np.nan, dtype=np.float32)
     obstacle_mask = np.zeros((num_steps, num_obs_peds), dtype=bool)
-    for t, step_obs in enumerate(obstacle_per_step):
+    step_predicted_positions = np.full(
+        (num_steps, num_obs_peds, PREDICT_HORIZON, 2), np.nan, dtype=np.float32,
+    )
+    step_predicted_mask = np.zeros((num_steps, num_obs_peds), dtype=bool)
+    for t, (step_obs, step_preds) in enumerate(zip(obstacle_per_step, predictions_per_step)):
         for pid, pos in step_obs.items():
             col = id_to_col[pid]
             obstacle_positions[t, col] = pos
             obstacle_mask[t, col] = True
+        for pid, pred in step_preds.items():
+            col = id_to_col[pid]
+            step_predicted_positions[t, col] = pred
+            step_predicted_mask[t, col] = True
 
     if velocities:
         ego_velocities = np.array(velocities, dtype=np.float32)
@@ -301,12 +379,14 @@ def simulate_ego(start, goal, model, device, ped_index, anchor):
         ego_velocities = np.zeros((0, 2), dtype=np.float32)
 
     return {
-        "ego_positions":      np.array(positions, dtype=np.float32),
-        "ego_velocities":     ego_velocities,
-        "obstacle_positions": obstacle_positions,
-        "obstacle_mask":      obstacle_mask,
-        "obstacle_ped_ids":   union_ids,
-        "reached_goal":       reached,
+        "ego_positions":            np.array(positions, dtype=np.float32),
+        "ego_velocities":           ego_velocities,
+        "obstacle_positions":       obstacle_positions,
+        "obstacle_mask":            obstacle_mask,
+        "obstacle_ped_ids":         union_ids,
+        "step_predicted_positions": step_predicted_positions,
+        "step_predicted_mask":      step_predicted_mask,
+        "reached_goal":             reached,
     }
 
 
@@ -338,6 +418,8 @@ def save_rollout(rollout, observed, predicted, ped_positions, ped_mask, anchor,
         predicted_positions=predicted_arr.astype(np.float32),
         obstacle_positions=rollout["obstacle_positions"],
         obstacle_mask=rollout["obstacle_mask"],
+        step_predicted_positions=rollout["step_predicted_positions"],
+        step_predicted_mask=rollout["step_predicted_mask"],
     )
 
     metadata = {
@@ -352,6 +434,8 @@ def save_rollout(rollout, observed, predicted, ped_positions, ped_mask, anchor,
         "max_speed": MAX_SPEED,
         "k_att": K_ATT,
         "k_rep": K_REP,
+        "predict_horizon": PREDICT_HORIZON,
+        "gamma": GAMMA,
         "influence_radius": INFLUENCE_RADIUS,
         "goal_tolerance": GOAL_TOLERANCE,
         "max_sim_steps": MAX_SIM_STEPS,
@@ -376,16 +460,6 @@ def plot_result(observed, predicted, future_truth, ego_path, anchor, output_plot
     output_plot.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(9, 7))
-
-    for i, pid in enumerate(observed):
-        hist = observed[pid]
-        ax.plot(hist[:, 0], hist[:, 1], "-", color="0.5", linewidth=1.0,
-                alpha=0.6, label="Observed history" if i == 0 else None)
-
-    for i, pid in enumerate(predicted):
-        pred = predicted[pid]
-        ax.plot(pred[:, 0], pred[:, 1], "r--", linewidth=1.0, alpha=0.7,
-                label="Predicted future" if i == 0 else None)
 
     drew_truth_label = False
     for pid, truth in future_truth.items():
@@ -440,9 +514,10 @@ def main():
     # somewhere in the rollout window — sampling from the full recording
     # wastes most of the budget on peds from a different time.
     rollout_frames = {anchor + t * FRAME_STEP for t in range(MAX_SIM_STEPS + 1)}
-    if KEEP_N_PEDS is not None:
-        ped_index = subsample_pedestrians(ped_index, KEEP_N_PEDS, RANDOM_SEED, rollout_frames)
-        print(f"Randomly kept {len(ped_index)} pedestrians present in rollout window (seed={RANDOM_SEED})")
+    if KEEP_PED_FRACTION is not None:
+        ped_index = subsample_pedestrians(ped_index, KEEP_PED_FRACTION, RANDOM_SEED, rollout_frames)
+        print(f"Randomly kept {len(ped_index)} pedestrians "
+              f"({KEEP_PED_FRACTION:.0%} of those present in rollout window, seed={RANDOM_SEED})")
 
     observed = get_observed(ped_index, anchor, FRAME_STEP, OBSERVE_LEN)
     future_truth = get_future_truth(ped_index, anchor, FRAME_STEP, PREDICT_LEN)
