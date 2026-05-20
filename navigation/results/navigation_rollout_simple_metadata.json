@@ -16,17 +16,17 @@
   "goal_tolerance": 0.4,
   "max_sim_steps": 200,
   "anchor_frame": 1040,
-  "num_steps_done": 61,
-  "num_pedestrians": 30,
-  "num_obstacle_pedestrians": 67,
+  "num_steps_done": 66,
+  "num_pedestrians": 20,
+  "num_obstacle_pedestrians": 50,
   "re_predict_every_step": true,
   "reached_goal": true,
   "start": [
-    -1.0,
-    1.0
+    0.0,
+    0.0
   ],
   "goal": [
-    11.0,
-    18.0
+    15.0,
+    15.0
   ]
 }

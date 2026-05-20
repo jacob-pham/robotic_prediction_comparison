@@ -12,7 +12,7 @@ BATCH_SIZE = 512
 LEARNING_RATE = 0.003
 NUM_EPOCHS = 150
 
-SCENE = "univ" # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
+SCENE = "zara2" # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
 VERSION = "v2"  # model version, refer to git commit history  
 
 PROCESSED_DIR = Path.cwd().parent / "datasets_processed" / SCENE
@@ -26,10 +26,13 @@ NUM_PLOT = 9    # how many example trajectories to plot
 
 
 def build_model_input(trajectory_tensor):
-    """Build the model input from a full trajectory tensor (same as train.py).
+    """Turn positions into the step-delta model input (same as train.py).
 
-    Feeds observed step-to-step displacements at indices 1..OBSERVE_LEN-1
-    and zeros everywhere else.
+    input:
+        trajectory_tensor: (N, 20, 2) ground-truth positions
+    output:
+        (N, 20, 2) with observed deltas at indices 1..OBSERVE_LEN-1 and
+        zeros elsewhere
     """
     model_input = torch.zeros_like(trajectory_tensor)
     model_input[:, 1:OBSERVE_LEN, :] = (
@@ -39,37 +42,45 @@ def build_model_input(trajectory_tensor):
 
 
 def compute_ade(predicted_future, true_future):
-    """Average Displacement Error: mean L2 distance over all predicted steps.
+    """Average displacement error.
 
-    predicted_future: (N, 12, 2)
-    true_future:      (N, 12, 2)
-    returns a scalar (Python float)
+    input:
+        predicted_future: (N, 12, 2)
+        true_future: (N, 12, 2)
+    output:
+        mean L2 distance across all predicted steps (float)
     """
-    # L2 distance at each predicted timestep for each trajectory
-    l2_per_step = torch.norm(predicted_future - true_future, dim=-1)  # (N, 12)
+    l2_per_step = torch.norm(predicted_future - true_future, dim=-1)
     ade = l2_per_step.mean().item()
     return ade
 
 
 def compute_fde(predicted_future, true_future):
-    """Final Displacement Error: L2 distance at the very last predicted step.
+    """Final displacement error.
 
-    predicted_future: (N, 12, 2)
-    true_future:      (N, 12, 2)
-    returns a scalar (Python float)
+    input:
+        predicted_future: (N, 12, 2)
+        true_future: (N, 12, 2)
+    output:
+        mean L2 distance at the final predicted step (float)
     """
-    # Only look at the last of the 12 predicted timesteps (index -1)
     l2_final = torch.norm(predicted_future[:, -1, :] - true_future[:, -1, :], dim=-1)
     fde = l2_final.mean().item()
     return fde
 
 
 def get_all_predictions(model, test_data, device):
-    """Run the model over the full test set and collect predictions.
+    """Run the model over the full test set.
 
-    Returns:
-      all_predictions:  (N, 20, 2) — full predicted trajectories
-      all_ground_truth: (N, 20, 2) — ground-truth trajectories
+    Predicted future deltas are cumsummed onto the last observed position
+    so downstream code sees absolute coordinates everywhere.
+
+    input:
+        model: trained TrajectoryPredictor
+        test_data: (N, 20, 2) tensor of test trajectories
+        device: torch device
+    output:
+        (all_predictions, all_ground_truth), each (N, 20, 2) on CPU
     """
     model.eval()
     test_loader = DataLoader(TensorDataset(test_data), batch_size=BATCH_SIZE, shuffle=False)
@@ -83,38 +94,41 @@ def get_all_predictions(model, test_data, device):
             model_input = build_model_input(batch_trajectories)
             raw_output = model(model_input)
 
-            # Model outputs step-to-step displacements for the future steps.
-            # Rebuild absolute positions by cumulatively summing those
-            # displacements onto the last observed position.
-            last_observed_pos = batch_trajectories[:, OBSERVE_LEN - 1:OBSERVE_LEN, :]  # (B, 1, 2)
-            predicted_deltas = raw_output[:, OBSERVE_LEN:, :]  # (B, 12, 2)
-            predicted_future = last_observed_pos + predicted_deltas.cumsum(dim=1)  # (B, 12, 2)
+            # rebuild absolute positions from predicted deltas
+            last_observed_pos = batch_trajectories[:, OBSERVE_LEN - 1:OBSERVE_LEN, :]
+            predicted_deltas = raw_output[:, OBSERVE_LEN:, :]
+            predicted_future = last_observed_pos + predicted_deltas.cumsum(dim=1)
 
-            # Assemble a full (B, 20, 2) trajectory so downstream code
-            # (ADE/FDE, plotting) sees absolute positions everywhere.
             predictions = batch_trajectories.clone()
             predictions[:, OBSERVE_LEN:, :] = predicted_future
 
             all_predictions.append(predictions.cpu())
             all_ground_truth.append(batch_trajectories.cpu())
 
-    all_predictions = torch.cat(all_predictions, dim=0)  # (N, 20, 2)
-    all_ground_truth = torch.cat(all_ground_truth, dim=0)  # (N, 20, 2)
+    all_predictions = torch.cat(all_predictions, dim=0)
+    all_ground_truth = torch.cat(all_ground_truth, dim=0)
     return all_predictions, all_ground_truth
 
 
 def plot_examples(all_predictions, all_ground_truth, num_examples):
-    """Plot a few predicted trajectories vs ground truth and save to a file.
+    """Plot predicted vs ground-truth trajectories and save a png.
 
-    Shows the 8 observed steps (shared), the 12 ground-truth future steps,
-    and the 12 predicted future steps.
+    Shows the 8 observed steps, the 12 ground-truth future steps, and the
+    12 predicted future steps.
+
+    input:
+        all_predictions: (N, 20, 2) absolute predicted trajectories
+        all_ground_truth: (N, 20, 2) absolute ground-truth trajectories
+        num_examples: how many random examples to plot
+    output:
+        None (writes a png to PREDICTIONS_PATH)
     """
     total = all_predictions.shape[0]
     random_seed = 41
     np.random.seed(random_seed)
     chosen_indices = np.random.choice(total, size=num_examples, replace=False)
 
-    # Arrange subplots in a roughly square grid
+    # roughly square grid
     n_cols = int(np.ceil(np.sqrt(num_examples)))
     n_rows = int(np.ceil(num_examples / n_cols))
 
@@ -122,19 +136,19 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
     axes = np.atleast_1d(axes).flatten()
 
     for plot_idx, traj_idx in enumerate(chosen_indices):
-        predicted_traj = all_predictions[traj_idx].numpy()  # (20, 2)
-        true_traj = all_ground_truth[traj_idx].numpy()  # (20, 2)
+        predicted_traj = all_predictions[traj_idx].numpy()
+        true_traj = all_ground_truth[traj_idx].numpy()
 
-        observed_xy = true_traj[:OBSERVE_LEN]  # (8, 2)
-        true_future_xy = true_traj[OBSERVE_LEN:]  # (12, 2)
-        pred_future_xy = predicted_traj[OBSERVE_LEN:]  # (12, 2)
+        observed_xy = true_traj[:OBSERVE_LEN]
+        true_future_xy = true_traj[OBSERVE_LEN:]
+        pred_future_xy = predicted_traj[OBSERVE_LEN:]
 
         ax = axes[plot_idx]
         ax.plot(observed_xy[:, 0], observed_xy[:, 1], "ko-", label="Observed", markersize=4)
         ax.plot(true_future_xy[:, 0], true_future_xy[:, 1], "g^-", label="True future", markersize=4)
         ax.plot(pred_future_xy[:, 0], pred_future_xy[:, 1], "rs-", label="Predicted", markersize=4)
 
-        # Dashed lines through origin (the last observed position after normalization)
+        # crosshairs at the normalization origin
         ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
         ax.axvline(0, color="gray", linewidth=0.5, linestyle="--")
 
@@ -144,7 +158,7 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
         ax.legend(fontsize=7)
         ax.set_aspect("equal")
 
-    # Hide any unused subplots in the grid
+    # blank the leftover grid cells
     for extra_idx in range(num_examples, len(axes)):
         axes[extra_idx].axis("off")
 
@@ -155,6 +169,13 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
 
 
 def main():
+    """Load the checkpoint, evaluate ADE/FDE, and save an example plot.
+
+    input:
+        None (reads config constants at module top)
+    output:
+        None (prints metrics and writes a png)
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
