@@ -11,7 +11,7 @@ BATCH_SIZE = 512
 LEARNING_RATE = 0.003
 NUM_EPOCHS = 150
 
-SCENE = "univ"  # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
+SCENE = "zara2"  # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
 VERSION = "v2"  # model version, refer to git commit history 
 
 PROCESSED_DIR = Path.cwd().parent / "datasets_processed" / SCENE
@@ -26,18 +26,18 @@ LOSS_CURVE_PATH = CHECKPOINT_DIR / f"lr_{LEARNING_RATE}_batch_{BATCH_SIZE}_epoch
 
 
 def build_model_input(trajectory_tensor):
-    """Build the model input from a full trajectory tensor.
+    """Turn positions into the step-delta model input.
 
-    Feeds step-to-step displacements (velocities) at the observed
-    timesteps instead of raw positions. The model's job is then to
-    extrapolate the recent velocity rather than infer it from positions.
+    The model learns to extrapolate recent velocity, not raw positions.
 
-    trajectory_tensor: (N, 20, 2) — full ground-truth trajectories (positions)
-    returns:           (N, 20, 2) — observed deltas at indices 1..OBSERVE_LEN-1,
-                                    zeros at index 0 and indices OBSERVE_LEN..19
+    input:
+        trajectory_tensor: (N, 20, 2) ground-truth positions
+    output:
+        (N, 20, 2) with observed deltas at indices 1..OBSERVE_LEN-1 and
+        zeros elsewhere
     """
     model_input = torch.zeros_like(trajectory_tensor)
-    # Observed deltas: position[t] - position[t-1] for t in 1..OBSERVE_LEN-1
+    # observed deltas: pos[t] - pos[t-1]
     model_input[:, 1:OBSERVE_LEN, :] = (
         trajectory_tensor[:, 1:OBSERVE_LEN, :] - trajectory_tensor[:, :OBSERVE_LEN - 1, :]
     )
@@ -45,28 +45,36 @@ def build_model_input(trajectory_tensor):
 
 
 def compute_loss(predictions, ground_truth):
-    """MSE loss on step-to-step displacements for the 12 future timesteps.
+    """MSE on step deltas over the 12 future timesteps.
 
-    The model output at indices 8-19 is interpreted as the displacement
-    from the previous frame, not an absolute position. So the target at
-    index t is ground_truth[t] - ground_truth[t-1] for t in 8..19.
+    Future model output is interpreted as deltas, so the target at index t
+    is gt[t] - gt[t-1].
 
-    predictions:  (batch, 20, 2) — full model output (future slots are deltas)
-    ground_truth: (batch, 20, 2) — full ground-truth trajectory (positions)
+    input:
+        predictions: (batch, 20, 2) model output (future slots are deltas)
+        ground_truth: (batch, 20, 2) absolute positions
+    output:
+        scalar MSE loss tensor
     """
-    predicted_deltas = predictions[:, OBSERVE_LEN:, :]  # (batch, 12, 2)
-    target_deltas = ground_truth[:, OBSERVE_LEN:, :] - ground_truth[:, OBSERVE_LEN - 1:-1, :]  # (batch, 12, 2)
+    predicted_deltas = predictions[:, OBSERVE_LEN:, :]
+    target_deltas = ground_truth[:, OBSERVE_LEN:, :] - ground_truth[:, OBSERVE_LEN - 1:-1, :]
     return nn.functional.mse_loss(predicted_deltas, target_deltas)
 
 def check_for_stopping_criterion(epoch, val_loss, val_losses):
-    """Example stopping criterion: stop if val loss doesn't improve for {criterion} epochs."""
-    criterion = 10  # how many epochs of no improvement to tolerate before stopping
+    """Stop if val loss hasn't improved by 1% in the last 10 epochs.
+
+    input:
+        epoch: current epoch (1-indexed)
+        val_loss: this epoch's val loss
+        val_losses: list of all val losses so far (including this one)
+    output:
+        True if we should stop, else False
+    """
+    criterion = 10  # epochs of no improvement allowed
 
     if epoch < criterion + 1:
-        return False  # Don't stop in the first criterion epochs
+        return False
 
-    # if val_loss has not improved by at least 1% compared to the best
-    # val loss in the previous {criterion} epochs, stop
     prior_val_losses = val_losses[-criterion - 1:-1]
     if not prior_val_losses:
         return False
@@ -75,36 +83,41 @@ def check_for_stopping_criterion(epoch, val_loss, val_losses):
     return relative_improvement < 0.01
 
 def run_one_epoch(model, data_loader, optimizer, is_training, device):
-    """Run one full pass over the data (train or val).
+    """One full pass over the data.
 
-    If is_training=True, computes gradients and updates weights.
-    If is_training=False, just computes loss without changing anything.
-    Returns the average loss across all batches.
+    input:
+        model: TrajectoryPredictor
+        data_loader: DataLoader yielding (trajectory_tensor,) tuples
+        optimizer: torch optimizer (only used when is_training=True)
+        is_training: True for train, False for val
+        device: torch device (unused; tensors come from data_loader)
+    output:
+        average loss across batches (float)
     """
     if is_training:
-        model.train()   # turns on dropout etc. (none here, but good practice)
+        model.train()
     else:
-        model.eval()    # turns off dropout etc.
+        model.eval()
 
     total_loss = 0.0
     total_batches = 0
 
     for batch_trajectories in data_loader:
-        # DataLoader wraps each batch in a list; unpack the single tensor
+        # DataLoader wraps each batch in a tuple; unpack the tensor
         batch_trajectories = batch_trajectories[0]
 
-        model_input = build_model_input(batch_trajectories)  # zero out future
+        model_input = build_model_input(batch_trajectories)
 
         if is_training:
-            optimizer.zero_grad()                       # clear old gradients
-            predictions = model(model_input)            # forward pass
-            loss        = compute_loss(predictions, batch_trajectories)
-            loss.backward()                             # compute new gradients
-            optimizer.step()                            # update weights
+            optimizer.zero_grad()
+            predictions = model(model_input)
+            loss = compute_loss(predictions, batch_trajectories)
+            loss.backward()
+            optimizer.step()
         else:
-            with torch.no_grad():                       # no gradient tracking needed
+            with torch.no_grad():
                 predictions = model(model_input)
-                loss        = compute_loss(predictions, batch_trajectories)
+                loss = compute_loss(predictions, batch_trajectories)
 
         total_loss += loss.item()
         total_batches += 1
@@ -114,6 +127,13 @@ def run_one_epoch(model, data_loader, optimizer, is_training, device):
 
 
 def main():
+    """Train the model and save the best checkpoint plus a loss curve.
+
+    input:
+        None (reads config constants at module top)
+    output:
+        None (writes a .pt checkpoint and a .png loss curve)
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 

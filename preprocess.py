@@ -4,7 +4,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-# ── Parameters ──────────────────────────────────────────────────────────────
 # Path to the leave-one-out fold we're using (held-out scene = eth)
 scene_name = "zara2"
 DATA_ROOT = Path.cwd() / "datasets" / scene_name
@@ -142,85 +141,11 @@ if __name__ == "__main__":
     main()
 
 
-# =============================================================================
-# DATASET STRUCTURE AND PREPROCESSING OVERVIEW
-# =============================================================================
-#
-# RAW DATASET LAYOUT
-# ------------------
-# The datasets/ folder contains pedestrian trajectory data from five real-world
-# scenes recorded by the ETH and UCY research groups:
-#
-#   datasets/
-#   ├── eth/       -- ETH pedestrian area (Zurich)
-#   ├── hotel/     -- ETH hotel area (Zurich)
-#   ├── univ/      -- UCY university campus
-#   ├── zara1/     -- UCY Zara shopping street (sequence 1)
-#   ├── zara2/     -- UCY Zara shopping street (sequence 2)
-#   └── raw/       -- original unprocessed files (not used here)
-#
-# Each scene folder has three subfolders: train/, val/, test/.
-# This is the Social-GAN "leave-one-out" split format: to evaluate on one
-# scene, that scene's data goes in test/, and the other four scenes' data
-# is split across train/ and val/.
-#
-# For example, in datasets/eth/:
-#   test/   contains biwi_eth.txt              <- the ETH scene we evaluate on
-#   train/  contains hotel, zara1/2, univ data <- earlier segments of the other 4 scenes
-#   val/    contains the same four scenes      <- later segments of the same recordings
-#
-# train/ and val/ cover the same four scenes, not different ones. The split is
-# temporal: Social-GAN cuts each scene's video chronologically, putting the
-# earlier portion in train/ and the later portion in val/.
-#
-# FILE FORMAT
-# -----------
-# Every .txt file is tab-separated with exactly 4 columns and no header:
-#
-#   frame_id    ped_id    x    y
-#
-#   frame_id : integer frame number from the original video recording.
-#              Multiple pedestrians share the same frame_id when they appear
-#              in the same video frame.
-#   ped_id   : integer ID for each tracked pedestrian. IDs are only unique
-#              within a single file — the same number in two different files
-#              refers to two different people.
-#   x, y     : world-space position in meters, already converted from pixels.
-#
-# Frame rate note: all files in this dataset use a frame step of 10
-# (frame_ids jump by 10: 0, 10, 20, ...), which corresponds to a 0.4-second
-# real-time interval at 25 fps.
-#
-# WHAT THIS SCRIPT DOES (STEP BY STEP)
-# -------------------------------------
-# 1. READ
-#    For each split (train, val, test), we walk the corresponding folder and
-#    read every .txt file into a pandas DataFrame with columns
-#    [frame_id, ped_id, x, y]. To avoid ID collisions across files, we tag
-#    each pedestrian as "ped_id_fN" where N is the file's index in the folder.
-#
-# 2. EXTRACT TRAJECTORY WINDOWS
-#    For each pedestrian in a file, we slide a 20-frame window over their
-#    recorded positions. A window is kept only if the pedestrian appears in
-#    all 20 frames with no gaps — every consecutive frame pair must differ
-#    by exactly 10. The first 8 frames are the "observed"
-#    portion; the last 12 are the "future" portion the model must predict.
-#    Pedestrians are processed independently (no social interactions yet).
-#
-# 3. NORMALIZE
-#    Each 20-frame trajectory is shifted so that the position at timestep 7
-#    (the last observed frame) becomes the origin (0, 0). All 20 positions
-#    are expressed relative to that anchor. This removes absolute location
-#    bias and lets the model focus on relative motion patterns.
-#
-# 4. SAVE
-#    Trajectories are stacked into a tensor of shape (N, 20, 2) — N windows,
-#    20 timesteps each, 2 coordinates (x, y) — and saved as a PyTorch .pt
-#    file in datasets_processed/{scene_name}/ for each split.
-#
-# OUTPUT
-# ------
-#   datasets_processed/eth/train.pt   shape ~ (30000, 20, 2)
-#   datasets_processed/eth/val.pt     shape ~ (5000,  20, 2)
-#   datasets_processed/eth/test.pt    shape ~ (364,   20, 2)
-# =============================================================================
+# Notes on the data:
+# Raw files are tab-separated with columns: frame_id, ped_id, x, y.
+# ped_id is only unique within a single file, so we tag it with the file index.
+# frame_ids jump by 10 (0.4 s at 25 fps).
+# Each split folder (train/val/test) holds one or more of these .txt files.
+# We slide a 20-frame window over each pedestrian, drop windows with gaps,
+# and shift each window so frame index 7 sits at the origin. Output is a
+# tensor of shape (N, 20, 2) saved to datasets_processed/{scene}/{split}.pt.

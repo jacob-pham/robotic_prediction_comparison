@@ -1,11 +1,6 @@
 """Animate a saved navigation rollout.
 
-Loads navigation/results/navigation_rollout_simple.npz (and metadata JSON if
-present) and writes an animation to the same folder. Does NOT touch the SSM
-model, the raw dataset, or the potential-field controller — everything needed
-is in the saved rollout.
-
-Run from project root:   python -m navigation.animate   (or  python navigation/animate.py)
+Run from project root:  python -m navigation.animate
 """
 from pathlib import Path
 import json
@@ -14,9 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-# Point matplotlib at the ffmpeg binary bundled with imageio-ffmpeg. The
-# system ffmpeg on Windows can fail with a DLL error; the bundled one is a
-# standalone static binary and just works.
+# use the ffmpeg bundled with imageio-ffmpeg; the system one can fail on Windows
 try:
     import imageio_ffmpeg
     plt.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
@@ -26,8 +19,7 @@ except ImportError:
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-# Optional first CLI arg: path to a different .npz rollout. Default is the
-# output of simulate_simple.py.
+# optional CLI arg: path to a different .npz rollout
 if len(sys.argv) > 1:
     RESULTS_FILE = Path(sys.argv[1]).resolve()
 else:
@@ -36,33 +28,70 @@ METADATA_FILE = RESULTS_FILE.with_name(RESULTS_FILE.stem + "_metadata.json")
 OUTPUT_GIF = RESULTS_FILE.with_suffix(".gif")
 OUTPUT_MP4 = RESULTS_FILE.with_suffix(".mp4")
 
-# Visual options.
 FPS = 6
-BITRATE = 1800  # mp4 bitrate
-DPI = 120  # render dpi for the saved animation
-SHOW_PREDICTIONS = True  # red dashed line — predicted future from current step
-AXIS_PAD = 1.5  # meters of padding around the data bounding box
+BITRATE = 1800
+DPI = 120
+SHOW_PREDICTIONS = True  # red dashed prediction line per obstacle
+AXIS_PAD = 1.5  # padding around the data bounding box (meters)
 
 
 def compute_axis_limits(start, goal, ego_positions, ped_positions, ped_mask,
                         predicted_positions):
-    """Bounding box around everything we plot, plus padding."""
-    xs = [start[0], goal[0]]
-    ys = [start[1], goal[1]]
-    xs.extend(ego_positions[:, 0].tolist())
-    ys.extend(ego_positions[:, 1].tolist())
-    if ped_mask.any():
-        xs.extend(ped_positions[ped_mask][:, 0].tolist())
-        ys.extend(ped_positions[ped_mask][:, 1].tolist())
-    if predicted_positions.size:
-        xs.extend(predicted_positions.reshape(-1, 2)[:, 0].tolist())
-        ys.extend(predicted_positions.reshape(-1, 2)[:, 1].tolist())
-    return (min(xs) - AXIS_PAD, max(xs) + AXIS_PAD), (min(ys) - AXIS_PAD, max(ys) + AXIS_PAD)
+    """Bounding box around everything plotted, with padding.
+
+    input:
+        start: (2,) ego start
+        goal: (2,) ego goal
+        ego_positions: (T+1, 2) ego path
+        ped_positions: (T+1, P, 2) per-step ped positions (NaN allowed)
+        ped_mask: (T+1, P) bool mask for ped_positions
+        predicted_positions: (N, 2) flat array of valid predicted points
+    output:
+        (xlim, ylim) tuples of (min, max) each with AXIS_PAD applied
+    """
+    xs = []
+    ys = []
+
+    # always include the start and goal markers
+    xs.append(start[0])
+    ys.append(start[1])
+    xs.append(goal[0])
+    ys.append(goal[1])
+
+    # include the whole ego path
+    for t in range(ego_positions.shape[0]):
+        xs.append(ego_positions[t, 0])
+        ys.append(ego_positions[t, 1])
+
+    # include every pedestrian position that is actually present
+    num_frames = ped_positions.shape[0]
+    num_peds = ped_positions.shape[1]
+    for t in range(num_frames):
+        for j in range(num_peds):
+            if ped_mask[t, j]:
+                xs.append(ped_positions[t, j, 0])
+                ys.append(ped_positions[t, j, 1])
+
+    # include every predicted point (already flattened to (N, 2))
+    flat_preds = predicted_positions.reshape(-1, 2)
+    for i in range(flat_preds.shape[0]):
+        xs.append(flat_preds[i, 0])
+        ys.append(flat_preds[i, 1])
+
+    xlim = (min(xs) - AXIS_PAD, max(xs) + AXIS_PAD)
+    ylim = (min(ys) - AXIS_PAD, max(ys) + AXIS_PAD)
+    return xlim, ylim
 
 
 def save_animation(anim, fps):
-    """Try MP4 (ffmpeg), fall back to GIF (pillow). Print a helpful message
-    if neither is available."""
+    """Write the animation, MP4 if ffmpeg is available else GIF.
+
+    input:
+        anim: matplotlib FuncAnimation
+        fps: frames per second
+    output:
+        None (writes a video next to RESULTS_FILE)
+    """
     if animation.writers.is_available("ffmpeg"):
         try:
             writer = animation.FFMpegWriter(fps=fps, bitrate=BITRATE)
@@ -81,6 +110,13 @@ def save_animation(anim, fps):
 
 
 def main():
+    """Load the saved rollout and write an animation.
+
+    input:
+        None (reads RESULTS_FILE / METADATA_FILE)
+    output:
+        None (writes a .mp4 or .gif next to the rollout file)
+    """
     if not RESULTS_FILE.exists():
         print(f"ERROR: no rollout file at {RESULTS_FILE}")
         print("Run the simulation first:  python -m navigation.simulate_simple")
@@ -100,22 +136,34 @@ def main():
         with open(METADATA_FILE) as f:
             metadata = json.load(f)
 
-    num_frames = ego_positions.shape[0]  # T + 1
-    num_peds = ped_positions.shape[1]  # display axis (all peds in scene)
-    num_obs_peds = step_predicted_positions.shape[1]  # union of peds seen as obstacles
+    num_frames = ego_positions.shape[0]
+    num_peds = ped_positions.shape[1]
+    num_obs_peds = step_predicted_positions.shape[1]
     horizon = step_predicted_positions.shape[2]
 
     print(f"Loaded rollout: {num_frames} frames, {num_peds} pedestrians on "
           f"display, {num_obs_peds} obstacle peds, horizon {horizon}")
 
-    # Bounding box: include any predicted point from any step (NaN-safe).
-    if step_predicted_mask.any():
-        valid_preds = step_predicted_positions[step_predicted_mask]
+    # bbox: gather every valid predicted point too
+    valid_pred_list = []
+    num_pred_steps = step_predicted_positions.shape[0]
+    for t in range(num_pred_steps):
+        for j in range(num_obs_peds):
+            if step_predicted_mask[t, j]:
+                for h in range(horizon):
+                    valid_pred_list.append(step_predicted_positions[t, j, h])
+    if valid_pred_list:
+        valid_preds = np.array(valid_pred_list, dtype=np.float32)
     else:
         valid_preds = np.zeros((0, 2), dtype=np.float32)
     xlim, ylim = compute_axis_limits(
         start, goal, ego_positions, ped_positions, ped_mask, valid_preds,
     )
+
+    scene = metadata.get("scene_name", "?")
+    anchor = metadata.get("anchor_frame", "?")
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.set_xlim(xlim)
@@ -123,32 +171,30 @@ def main():
     ax.set_aspect("equal")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    scene = metadata.get("scene_name", "?")
-    anchor = metadata.get("anchor_frame", "?")
     ax.set_title(f"Navigation rollout - {scene} (anchor frame {anchor})")
     ax.grid(True, alpha=0.3)
 
-    # Static items: start and goal.
+    # static start/goal markers
     ax.plot(start[0], start[1], "bs", markersize=10, label="Start")
     ax.plot(goal[0],  goal[1],  "b*", markersize=16, label="Goal")
 
-    # Dynamic artists, updated each frame.
-    ego_path_line, = ax.plot([], [], "b-", linewidth=2.0, label="Ego path")
-    ego_dot,        = ax.plot([], [], "bo", markersize=11, label="Ego")
-    peds_dots,      = ax.plot([], [], "ko", markersize=6,  label="Pedestrians")
+    # dynamic artists updated each frame (ax.plot returns a list, take item 0)
+    ego_path_line = ax.plot([], [], "b-", linewidth=2.0, label="Ego path")[0]
+    ego_dot = ax.plot([], [], "bo", markersize=11, label="Ego")[0]
+    peds_dots = ax.plot([], [], "ko", markersize=6, label="Pedestrians")[0]
 
-    # One line per obstacle slot — we update its data each frame from the
-    # per-step predictions saved by the simulator. Slots that have no
-    # prediction at a given step are blanked out.
-    # Dashed segments connect successive predicted steps, and a marker at
-    # each vertex makes it easy to count off the 8 future positions.
+    # one prediction line per obstacle slot, blanked when no prediction
     pred_lines = []
     if SHOW_PREDICTIONS:
         for i in range(num_obs_peds):
-            line, = ax.plot([], [], linestyle="--", color="red",
-                            marker="o", markersize=3,
-                            linewidth=0.9, alpha=0.6,
-                            label="Predicted future" if i == 0 else None)
+            # only label the first line so the legend shows one entry
+            if i == 0:
+                label = "Predicted future"
+            else:
+                label = None
+            line = ax.plot([], [], linestyle="--", color="red",
+                           marker="o", markersize=3,
+                           linewidth=0.9, alpha=0.6, label=label)[0]
             pred_lines.append(line)
 
     step_text = ax.text(0.02, 0.97, "", transform=ax.transAxes, va="top",
@@ -158,20 +204,28 @@ def main():
 
     ax.legend(loc="lower right", fontsize=8)
 
-    num_pred_steps = step_predicted_positions.shape[0]  # T (one shorter than ego_positions)
-
     def update(t):
-        # Ego: path up to and including step t, plus a marker at current pos.
+        """Draw one animation frame.
+
+        input:
+            t: sim step index (0..num_frames-1)
+        output:
+            list of artists that were updated (for matplotlib)
+        """
+        # ego: trail + current dot
         ego_path_line.set_data(ego_positions[:t + 1, 0], ego_positions[:t + 1, 1])
         ego_dot.set_data([ego_positions[t, 0]], [ego_positions[t, 1]])
 
-        # Pedestrians visible at this step.
-        m = ped_mask[t]
-        peds_dots.set_data(ped_positions[t, m, 0], ped_positions[t, m, 1])
+        # peds visible at this step
+        visible_x = []
+        visible_y = []
+        for j in range(num_peds):
+            if ped_mask[t, j]:
+                visible_x.append(ped_positions[t, j, 0])
+                visible_y.append(ped_positions[t, j, 1])
+        peds_dots.set_data(visible_x, visible_y)
 
-        # Predicted future: re-predicted at every control step. Index t into
-        # the per-step predictions; the last frame (t == num_pred_steps) has
-        # no controller action, so we just blank the prediction lines.
+        # predicted futures (last frame has no controller step, so blank)
         if SHOW_PREDICTIONS:
             if t < num_pred_steps:
                 for i, line in enumerate(pred_lines):
@@ -199,7 +253,6 @@ def main():
         interval=1000 / FPS, blit=False, repeat=False,
     )
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     save_animation(anim, FPS)
 
 

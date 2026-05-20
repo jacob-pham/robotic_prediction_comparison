@@ -9,7 +9,6 @@ except ImportError:
         "ERROR: s4d.py not found.\n"
         "Download it from:\n"
         "  https://github.com/state-spaces/s4/blob/main/models/s4/s4d.py\n"
-        "and save it as s4d.py in the project root."
     )
     sys.exit(1)
 
@@ -22,35 +21,26 @@ FF_EXPANSION = 2  # feedforward layer expands hidden dim by this factor
 
 
 class TrajectoryPredictor(nn.Module):
-    """A simple SSM-based trajectory predictor.
+    """Simple SSM-based trajectory predictor.
 
-    Architecture (in order):
-      1. Input projection: Linear(2 -> HIDDEN_DIM)
-      2. NUM_LAYERS Transformer-style blocks, each containing:
-           a. Pre-norm S4D sub-block:
-                x = x + S4D(LayerNorm(x))
-           b. Pre-norm feedforward sub-block (with GELU nonlinearity):
-                x = x + Linear -> GELU -> Linear(LayerNorm(x))
-         The feedforward sub-block is critical — it provides the only
-         nonlinearity in the model. Without it, the whole network is
-         approximately linear and cannot fit nonlinear motion patterns.
-      3. Output projection: Linear(HIDDEN_DIM -> 2)
-
-    Input:  (batch, 20, 2) — step-to-step displacements (velocities).
-            Index 0 is zero (no prior frame), indices 1-7 are the
-            observed deltas, indices 8-19 are zeroed (the model rolls
-            out from its internal state).
-    Output: (batch, 20, 2) — at timesteps 8-19, the values are step-to-step
-            displacements (delta from the previous frame), not absolute
-            positions. Loss is computed only on timesteps 8-19.
+    Architecture: Linear(2 -> HIDDEN_DIM), then NUM_LAYERS pre-norm blocks
+    of (S4D + residual) and (FF GELU + residual), then Linear(HIDDEN_DIM -> 2).
+    The feedforward sub-block is what gives the network its nonlinearity.
     """
 
     def __init__(self):
+        """Build the layers.
+
+        input:
+            None
+        output:
+            None (initializes module parameters)
+        """
         super().__init__()
 
         self.input_projection = nn.Linear(INPUT_DIM, HIDDEN_DIM)
 
-        # Each block needs: S4D layer, two LayerNorms, and a feedforward net
+        # each block: S4D, two LayerNorms, and a feedforward net
         self.s4d_layers = nn.ModuleList([
             S4D(d_model=HIDDEN_DIM, d_state=STATE_DIM, transposed=False, dropout=0.0)
             for _ in range(NUM_LAYERS)
@@ -73,9 +63,12 @@ class TrajectoryPredictor(nn.Module):
         self.output_projection = nn.Linear(HIDDEN_DIM, OUTPUT_DIM)
 
     def forward(self, input_sequence):
-        """
-        input_sequence: (batch, 20, 2)
-        returns:        (batch, 20, 2)
+        """Forward pass.
+
+        input:
+            input_sequence: (batch, 20, 2) step deltas; future slots zeroed
+        output:
+            (batch, 20, 2) where future slots are predicted step deltas
         """
         hidden = self.input_projection(input_sequence)
 
@@ -85,12 +78,12 @@ class TrajectoryPredictor(nn.Module):
             self.norms_before_ff,
             self.feedforwards,
         ):
-            # Sub-block 1: S4D with pre-norm and residual
+            # S4D sub-block (pre-norm, residual)
             normed = norm_s4d(hidden)
             s4d_output = s4d_layer(normed)[0]  # S4D returns (output, state)
             hidden = hidden + s4d_output
 
-            # Sub-block 2: feedforward with pre-norm and residual
+            # feedforward sub-block (pre-norm, residual)
             normed = norm_ff(hidden)
             ff_output = feedforward(normed)
             hidden = hidden + ff_output
@@ -101,6 +94,13 @@ class TrajectoryPredictor(nn.Module):
 
 
 def main():
+    """Test the model on a dummy batch.
+
+    input:
+        None
+    output:
+        None (prints shapes and param count)
+    """
     print("Running forward pass on dummy batch...")
 
     model = TrajectoryPredictor()
