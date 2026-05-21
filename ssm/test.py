@@ -10,9 +10,9 @@ from model import TrajectoryPredictor
 # Paths and constants 
 BATCH_SIZE = 512
 LEARNING_RATE = 0.003
-NUM_EPOCHS = 150
+NUM_EPOCHS = 50
 
-SCENE = "zara2" # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
+SCENE = "univ" # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
 VERSION = "v2"  # model version, refer to git commit history  
 
 PROCESSED_DIR = Path.cwd().parent / "datasets_processed" / SCENE
@@ -135,6 +135,16 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
     axes = np.atleast_1d(axes).flatten()
 
+    # compute global x/y range across all chosen trajectories
+    chosen_preds = all_predictions[chosen_indices].numpy()
+    chosen_gt = all_ground_truth[chosen_indices].numpy()
+    all_xy = np.concatenate([chosen_preds, chosen_gt], axis=0)  # (2*num_examples, 20, 2)
+    x_min, x_max = all_xy[:, :, 0].min(), all_xy[:, :, 0].max()
+    y_min, y_max = all_xy[:, :, 1].min(), all_xy[:, :, 1].max()
+    pad = 0.5
+    x_lim = (x_min - pad, x_max + pad)
+    y_lim = (y_min - pad, y_max + pad)
+
     for plot_idx, traj_idx in enumerate(chosen_indices):
         predicted_traj = all_predictions[traj_idx].numpy()
         true_traj = all_ground_truth[traj_idx].numpy()
@@ -152,6 +162,8 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
         ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
         ax.axvline(0, color="gray", linewidth=0.5, linestyle="--")
 
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
         ax.set_title(f"Trajectory {traj_idx}")
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")

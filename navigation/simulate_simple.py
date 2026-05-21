@@ -20,8 +20,8 @@ from controller import compute_velocity, at_goal
 SCENE_NAME = "univ"
 RAW_FILE = PROJECT_ROOT / "datasets" / SCENE_NAME / "test" / "students003.txt"
 CHECKPOINT_PATH = (
-    PROJECT_ROOT / "ssm" / SCENE_NAME / "v2"
-    / "lr_0.003_batch_512_epochs_150_best_model.pt"
+    PROJECT_ROOT / "ssm" / SCENE_NAME / "v3"
+    / "lr_0.003_batch_512_epochs_50_best_model.pt"
 )
 
 OBSERVE_LEN = 8      # observed frames fed to the model

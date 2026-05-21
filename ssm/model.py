@@ -38,27 +38,46 @@ class TrajectoryPredictor(nn.Module):
         """
         super().__init__()
 
-        self.input_projection = nn.Linear(INPUT_DIM, HIDDEN_DIM)
+        self.input_projection = nn.Linear(INPUT_DIM, HIDDEN_DIM) # project input to hidden dimension
 
-        # each block: S4D, two LayerNorms, and a feedforward net
-        self.s4d_layers = nn.ModuleList([
-            S4D(d_model=HIDDEN_DIM, d_state=STATE_DIM, transposed=False, dropout=0.0)
-            for _ in range(NUM_LAYERS)
-        ])
-        self.norms_before_s4d = nn.ModuleList([
-            nn.LayerNorm(HIDDEN_DIM) for _ in range(NUM_LAYERS)
-        ])
-        self.norms_before_ff = nn.ModuleList([
-            nn.LayerNorm(HIDDEN_DIM) for _ in range(NUM_LAYERS)
-        ])
-        self.feedforwards = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(HIDDEN_DIM, HIDDEN_DIM * FF_EXPANSION),
-                nn.GELU(),
-                nn.Linear(HIDDEN_DIM * FF_EXPANSION, HIDDEN_DIM),
-            )
-            for _ in range(NUM_LAYERS)
-        ])
+        self.norm1_s4d = nn.LayerNorm(HIDDEN_DIM) # pre-norm for S4D layer; normalizes across feature dimension
+        self.s4d1 = S4D(d_model=HIDDEN_DIM, d_state=STATE_DIM, transposed=False, dropout=0.0) # first S4D layer; processes sequence and captures temporal dependencies
+        self.norm1_ff = nn.LayerNorm(HIDDEN_DIM) # pre-norm for feedforward layer; normalizes across feature dimension
+        self.ff1 = nn.Sequential(
+            nn.Linear(HIDDEN_DIM, HIDDEN_DIM * FF_EXPANSION),
+            nn.GELU(),
+            nn.Linear(HIDDEN_DIM * FF_EXPANSION, HIDDEN_DIM),
+        ) # first feedforward layer; adds nonlinearity and allows for complex feature interactions
+
+        # second block
+        self.norm2_s4d = nn.LayerNorm(HIDDEN_DIM) 
+        self.s4d2 = S4D(d_model=HIDDEN_DIM, d_state=STATE_DIM, transposed=False, dropout=0.0)
+        self.norm2_ff = nn.LayerNorm(HIDDEN_DIM)
+        self.ff2 = nn.Sequential(
+            nn.Linear(HIDDEN_DIM, HIDDEN_DIM * FF_EXPANSION),
+            nn.GELU(),
+            nn.Linear(HIDDEN_DIM * FF_EXPANSION, HIDDEN_DIM),
+        )
+
+        # #third block
+        # self.norm3_s4d = nn.LayerNorm(HIDDEN_DIM)
+        # self.s4d3 = S4D(d_model=HIDDEN_DIM, d_state=STATE_DIM, transposed=False, dropout=0.0)
+        # self.norm3_ff = nn.LayerNorm(HIDDEN_DIM)
+        # self.ff3 = nn.Sequential(
+        #     nn.Linear(HIDDEN_DIM, HIDDEN_DIM * FF_EXPANSION),
+        #     nn.GELU(),
+        #     nn.Linear(HIDDEN_DIM * FF_EXPANSION, HIDDEN_DIM),
+        # )
+
+        # #fourth block
+        # self.norm4_s4d = nn.LayerNorm(HIDDEN_DIM)
+        # self.s4d4 = S4D(d_model=HIDDEN_DIM, d_state=STATE_DIM, transposed=False, dropout=0.0)
+        # self.norm4_ff = nn.LayerNorm(HIDDEN_DIM)
+        # self.ff4 = nn.Sequential(
+        #     nn.Linear(HIDDEN_DIM, HIDDEN_DIM * FF_EXPANSION),
+        #     nn.GELU(),
+        #     nn.Linear(HIDDEN_DIM * FF_EXPANSION, HIDDEN_DIM),
+        # )
 
         self.output_projection = nn.Linear(HIDDEN_DIM, OUTPUT_DIM)
 
@@ -72,21 +91,17 @@ class TrajectoryPredictor(nn.Module):
         """
         hidden = self.input_projection(input_sequence)
 
-        for s4d_layer, norm_s4d, norm_ff, feedforward in zip(
-            self.s4d_layers,
-            self.norms_before_s4d,
-            self.norms_before_ff,
-            self.feedforwards,
-        ):
-            # S4D sub-block (pre-norm, residual)
-            normed = norm_s4d(hidden)
-            s4d_output = s4d_layer(normed)[0]  # S4D returns (output, state)
-            hidden = hidden + s4d_output
+        hidden = hidden + self.s4d1(self.norm1_s4d(hidden))[0]
+        hidden = hidden + self.ff1(self.norm1_ff(hidden))
 
-            # feedforward sub-block (pre-norm, residual)
-            normed = norm_ff(hidden)
-            ff_output = feedforward(normed)
-            hidden = hidden + ff_output
+        hidden = hidden + self.s4d2(self.norm2_s4d(hidden))[0]
+        hidden = hidden + self.ff2(self.norm2_ff(hidden))
+
+        # hidden = hidden + self.s4d3(self.norm3_s4d(hidden))[0]
+        # hidden = hidden + self.ff3(self.norm3_ff(hidden))
+
+        # hidden = hidden + self.s4d4(self.norm4_s4d(hidden))[0]
+        # hidden = hidden + self.ff4(self.norm4_ff(hidden))
 
         predicted_sequence = self.output_projection(hidden)
 

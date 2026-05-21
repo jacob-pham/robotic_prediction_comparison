@@ -9,10 +9,10 @@ from model import TrajectoryPredictor
 
 BATCH_SIZE = 512
 LEARNING_RATE = 0.003
-NUM_EPOCHS = 150
+NUM_EPOCHS = 50
 
-SCENE = "zara2"  # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
-VERSION = "v2"  # model version, refer to git commit history 
+SCENE = "univ"  # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
+VERSION = "v3"  # model version, refer to git commit history 
 
 PROCESSED_DIR = Path.cwd().parent / "datasets_processed" / SCENE
 print(f"Using processed data from: {PROCESSED_DIR}")
