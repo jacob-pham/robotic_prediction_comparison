@@ -74,3 +74,25 @@ def at_goal(ego_pos, goal, tol):
         True if ego is within tol of the goal, else False
     """
     return np.linalg.norm(goal - ego_pos) < tol
+
+
+def constant_velocity_predict(history, horizon):
+    """Fallback predictor: repeat the last step delta forward.
+
+    input:
+        history: array(k, 2) chronological positions
+        horizon: number of future steps to predict
+    output:
+        array(horizon, 2) absolute predicted positions
+    """
+    last_pos = history[-1]
+    if len(history) >= 2:
+        velocity = history[-1] - history[-2]
+    else:
+        velocity = np.zeros_like(last_pos)
+
+    predictions = np.zeros((horizon, 2), dtype=np.float32)
+    for step in range(horizon):
+        # move (step + 1) steps forward from the last position
+        predictions[step] = last_pos + velocity * (step + 1)
+    return predictions
