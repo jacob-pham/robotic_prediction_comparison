@@ -7,7 +7,7 @@ class TrajectoryPredictor(nn.Module):
 
         Layers:
             LSTM: two stacked LSTMs with input_size=8 for the 8 features. hidden_size=64
-            Linear: inputs 8 numbers, outputs 24 for 12 predictedsteps * 2 coordinates
+            Linear: inputs 64 numbers, outputs 24 for 12 predictedsteps * 2 coordinates
         """
         super().__init__()
 
