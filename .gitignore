@@ -1,1 +1,5 @@
 /__pycache__/
+/ssm/__pycache__/
+*.pyc
+
+
