@@ -28,18 +28,40 @@ LEARNING_RATE = 1e-3
 NUM_EPOCHS   = 50
 
 
+def positions_to_velocities(traj):
+    # traj: (B, T, 2)
+    vel = torch.zeros_like(traj)
+    vel[:, 1:, :] = traj[:, 1:, :] - traj[:, :-1, :]
+    return vel
+
+def random_rotate(traj):
+    angle = torch.rand(1) * 2 * torch.pi
+    c, s = torch.cos(angle), torch.sin(angle)
+    R = torch.tensor([[c, -s], [s, c]])
+    return traj @ R.T
+
 def build_model_input(trajectory_tensor):
     """Zero out the future 12 timesteps so the model only sees past observations."""
     model_input = trajectory_tensor.clone()
     model_input[:, OBSERVE_LEN:, :] = 0.0   # blank out timesteps 8–19
     return model_input
 
+import torch
+import torch.nn as nn
 
-def compute_loss(predictions, ground_truth):
-    """MSE loss computed only on the 12 predicted future timesteps (indices 8–19)."""
-    predicted_future = predictions[:, OBSERVE_LEN:, :]     # (batch, 12, 2)
-    true_future      = ground_truth[:, OBSERVE_LEN:, :]    # (batch, 12, 2)
-    return nn.functional.mse_loss(predicted_future, true_future)
+def compute_custom_loss(predictions, ground_truth, fde_weight=2.0):
+    """
+    Computes a hybrid loss combining MSE over the full path and a dedicated penalty for the Final Displacement Error (FDE).
+    """
+    predicted_future = predictions[:, OBSERVE_LEN:, :]
+    true_future = ground_truth[:, OBSERVE_LEN:, :]
+    
+    # Linearly increasing weights: later steps matter more
+    weights = torch.linspace(0.5, 1.5, PREDICT_LEN, device=predictions.device)
+    weighted_mse = ((predicted_future - true_future) ** 2 * weights[None, :, None]).mean()
+    
+    fde_loss = nn.functional.l1_loss(predicted_future[:, -1], true_future[:, -1])
+    return weighted_mse + fde_weight * fde_loss
 
 
 def run_one_epoch(model, data_loader, optimizer, is_training, device):
@@ -53,18 +75,22 @@ def run_one_epoch(model, data_loader, optimizer, is_training, device):
 
     for batch_trajectories in data_loader:
         batch_trajectories = batch_trajectories[0].to(device)
+        batch_trajectories = positions_to_velocities(batch_trajectories)
+        if is_training:
+            batch_trajectories = random_rotate(batch_trajectories)
         model_input = build_model_input(batch_trajectories)
 
         if is_training:
             optimizer.zero_grad()
             predictions = model(model_input)
-            loss        = compute_loss(predictions, batch_trajectories)
+            loss        = compute_custom_loss(predictions, batch_trajectories)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         else:
             with torch.no_grad():
                 predictions = model(model_input)
-                loss        = compute_loss(predictions, batch_trajectories)
+                loss        = compute_custom_loss(predictions, batch_trajectories)
 
         total_loss    += loss.item()
         total_batches += 1
@@ -93,6 +119,8 @@ def main():
     model     = TrajectoryPredictor().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5, min_lr=1e-5)
+
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
     #training loop
@@ -106,14 +134,17 @@ def main():
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-
-        print(f"  Epoch {epoch:3d}/{NUM_EPOCHS}  |  train loss: {train_loss:.6f}  |  val loss: {val_loss:.6f}")
+        
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"  Epoch {epoch:3d}/{NUM_EPOCHS}  |  LR: {current_lr:.6f}  |  train loss: {train_loss:.6f}  |  val loss: {val_loss:.6f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             checkpoint_path = CHECKPOINT_DIR / "best_model.pt"
             torch.save(model.state_dict(), checkpoint_path)
             print(f"  New best val loss {best_val_loss:.6f} — checkpoint saved.")
+
+        scheduler.step(val_loss)
 
     print(f"\nTraining complete for {args.scene.upper()}. Best val loss: {best_val_loss:.6f}")
 
