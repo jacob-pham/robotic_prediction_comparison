@@ -62,9 +62,12 @@ def get_all_predictions(model, test_data, device):
     with torch.no_grad():
         for (batch_trajectories,) in test_loader:
             batch_trajectories = batch_trajectories.to(device)
+            start_positions = batch_trajectories[:, 0:1, :].clone().cpu()
             model_input        = build_model_input(batch_trajectories)
-            batch_trajectories = positions_to_velocities(batch_trajectories)
-            predictions        = model(model_input)
+            model_input_vel = positions_to_velocities(model_input)
+            pred_velocities = model(model_input_vel).cpu()
+
+            pred_absolute = start_positions + torch.cumsum(pred_velocities, dim=1)
 
             all_predictions.append(predictions.cpu())
             all_ground_truth.append(batch_trajectories.cpu())
