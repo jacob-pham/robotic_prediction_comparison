@@ -24,6 +24,12 @@ BATCH_SIZE  = 64
 NUM_PLOT    = 5    # how many example trajectories to plot
 
 
+def positions_to_velocities(traj):
+    # traj: (B, T, 2)
+    vel = torch.zeros_like(traj)
+    vel[:, 1:, :] = traj[:, 1:, :] - traj[:, :-1, :]
+    return vel
+
 def build_model_input(trajectory_tensor):
     """Zero out the 12 future timesteps, same as in tcn_train.py."""
     model_input = trajectory_tensor.clone()
@@ -57,6 +63,7 @@ def get_all_predictions(model, test_data, device):
         for (batch_trajectories,) in test_loader:
             batch_trajectories = batch_trajectories.to(device)
             model_input        = build_model_input(batch_trajectories)
+            batch_trajectories = positions_to_velocities(batch_trajectories)
             predictions        = model(model_input)
 
             all_predictions.append(predictions.cpu())
