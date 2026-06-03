@@ -35,7 +35,7 @@ class TemporalBlock(nn.Module):
 
 class TrajectoryPredictor(nn.Module):
     """TCN-based Trajectory Predictor."""
-    def __init__(self, input_dim=2, output_dim=2, num_channels=[64, 64], kernel_size=3, dropout=0.0):
+    def __init__(self, input_dim=2, output_dim=2, num_channels=[64, 128, 128, 256], kernel_size=3, dropout=0.0):
         super(TrajectoryPredictor, self).__init__()
         layers = []
         num_levels = len(num_channels)
