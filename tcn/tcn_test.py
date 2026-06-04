@@ -52,7 +52,6 @@ def compute_fde(predicted_future, true_future):
 
 
 def get_all_predictions(model, test_data, device):
-    """Run the model over the full test set and collect predictions."""
     model.eval()
     test_loader = DataLoader(TensorDataset(test_data), batch_size=BATCH_SIZE, shuffle=False)
 
@@ -62,18 +61,20 @@ def get_all_predictions(model, test_data, device):
     with torch.no_grad():
         for (batch_trajectories,) in test_loader:
             batch_trajectories = batch_trajectories.to(device)
-            start_positions = batch_trajectories[:, 0:1, :].clone().cpu()
-            model_input        = build_model_input(batch_trajectories)
+            start_positions = batch_trajectories[:, 0:1, :].clone()  # (B, 1, 2)
+
+            model_input     = build_model_input(batch_trajectories)
             model_input_vel = positions_to_velocities(model_input)
             pred_velocities = model(model_input_vel).cpu()
 
-            pred_absolute = start_positions + torch.cumsum(pred_velocities, dim=1)
+            # Reconstruct absolute positions from predicted velocities
+            pred_absolute = start_positions.cpu() + torch.cumsum(pred_velocities, dim=1)
 
-            all_predictions.append(predictions.cpu())
+            all_predictions.append(pred_absolute)
             all_ground_truth.append(batch_trajectories.cpu())
 
-    all_predictions  = torch.cat(all_predictions,  dim=0)  # (N, 20, 2)
-    all_ground_truth = torch.cat(all_ground_truth, dim=0)  # (N, 20, 2)
+    all_predictions  = torch.cat(all_predictions,  dim=0)
+    all_ground_truth = torch.cat(all_ground_truth, dim=0)
     return all_predictions, all_ground_truth
 
 
@@ -96,8 +97,8 @@ def plot_examples(all_predictions, all_ground_truth, num_examples):
 
         ax = axes[plot_idx]
         ax.plot(observed_xy[:, 0],    observed_xy[:, 1],    "ko-", label = "Observed",    markersize=4)
-        ax.plot(true_future_xy[:, 0], true_future_xy[:, 1], "g^-", label = "True future", markersize=4)
-        ax.plot(pred_future_xy[:, 0], pred_future_xy[:, 1], "rs-", label = "Predicted",   markersize=4)
+        ax.plot(true_future_xy[:, 0], true_future_xy[:, 1], "go-", label = "True future", markersize=4)
+        ax.plot(pred_future_xy[:, 0], pred_future_xy[:, 1], "ro-", label = "Predicted",   markersize=4)
 
         ax.axhline(0, color = "gray", linewidth = 0.5, linestyle = "--")
         ax.axvline(0, color = "gray", linewidth = 0.5, linestyle = "--")
