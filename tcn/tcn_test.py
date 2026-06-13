@@ -9,13 +9,13 @@ from tcn_model import TrajectoryPredictor
 
 #parse scene arguments
 parser = argparse.ArgumentParser(description = "Test TCN Trajectory Predictor on a specific scene.")
-parser.add_argument("--scene", type = str, default = "eth", choices = ["eth", "hotel", "univ", "zara1", "zara2"],
+parser.add_argument("--scene", type = str, default = "univ", choices = ["eth", "hotel", "univ", "zara1", "zara2"],
                     help = "The dataset scene directory to test.")
 args = parser.parse_args()
 
 #dynamic paths
-BASE_DATA_DIR    = Path(r"C:\Users\twinh\anaconda_projects\PIC 16B Project\datasets_processed") / args.scene
-CHECKPOINT_PATH  = Path.cwd() / "tcn" / args.scene / "checkpoints" / "best_model.pt"
+BASE_DATA_DIR    = Path.cwd().parent / "datasets_processed" / args.scene
+CHECKPOINT_PATH  = Path.cwd() / args.scene / "checkpoints" / "best_model.pt"
 PREDICTIONS_PATH = Path.cwd() / f"predictions_{args.scene}.png"
 
 OBSERVE_LEN = 8    # frames we observe (indices 0–7)
@@ -127,6 +127,7 @@ def main():
     model = TrajectoryPredictor().to(device)
     model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
     print(f"Loaded checkpoint from {CHECKPOINT_PATH}")
+    print(f"Number of model parameters: {sum(p.numel() for p in model.parameters())}")
 
     #get predictions for the whole test set
     all_predictions, all_ground_truth = get_all_predictions(model, test_data, device)

@@ -10,15 +10,15 @@ from tcn_model import TrajectoryPredictor
 
 #parse scene arguments
 parser = argparse.ArgumentParser(description="Train TCN Trajectory Predictor on a specific scene.")
-parser.add_argument("--scene", type=str, default = "eth", choices = ["eth", "hotel", "univ", "zara1", "zara2"],
+parser.add_argument("--scene", type=str, default = "univ", choices = ["eth", "hotel", "univ", "zara1", "zara2"],
                     help = "The dataset scene directory to train on.")
 args = parser.parse_args()
 
 #dynamic paths
-#base directory pointing to your local path
-BASE_DATA_DIR = Path(r"C:\Users\twinh\anaconda_projects\PIC 16B Project\datasets_processed") / args.scene
-CHECKPOINT_DIR = Path.cwd() / "tcn" / args.scene / "checkpoints"
-LOSS_CURVE_PATH = Path.cwd() / "tcn" / args.scene / "loss_curve.png"
+BASE_DATA_DIR = Path.cwd().parent / "datasets_processed" / args.scene
+print(f"Using processed data from: {BASE_DATA_DIR}")
+CHECKPOINT_DIR = Path.cwd() / args.scene / "checkpoints"
+LOSS_CURVE_PATH = Path.cwd() / args.scene / "loss_curve.png"
 
 #hyperparameters
 OBSERVE_LEN  = 8    # frames we observe (indices 0–7)

@@ -22,7 +22,7 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 if len(sys.argv) > 1:
     RESULTS_FILE = Path(sys.argv[1]).resolve()
 else:
-    RESULTS_FILE = RESULTS_DIR / "navigation_rollout_simple.npz"
+    RESULTS_FILE = RESULTS_DIR / "navigation_rollout_simple_lstm.npz"
 METADATA_FILE = RESULTS_FILE.with_name(RESULTS_FILE.stem + "_metadata.json")
 OUTPUT_GIF = RESULTS_FILE.with_suffix(".gif")
 OUTPUT_MP4 = RESULTS_FILE.with_suffix(".mp4")
@@ -111,6 +111,7 @@ def main():
     scene = metadata.get("scene_name", "?")
     anchor = metadata.get("anchor_frame", "?")
     dt = metadata.get("dt_seconds", 0.4)
+    model_type = metadata.get("model_type", "?")
 
     xlim, ylim = compute_axis_limits(
         start, goal, ego_positions,
@@ -127,7 +128,7 @@ def main():
     ax.set_aspect("equal")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    ax.set_title(f"Navigation rollout - {scene} (anchor frame {anchor})")
+    ax.set_title(f"Navigation rollout - {model_type} - {scene} (anchor frame {anchor})")
     ax.grid(True, alpha=0.3)
 
     # static markers for start and goal

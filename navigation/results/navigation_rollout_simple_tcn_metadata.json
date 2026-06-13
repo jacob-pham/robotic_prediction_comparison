@@ -1,8 +1,8 @@
 {
   "scene_name": "univ",
-  "model_type": "ssm",
+  "model_type": "tcn",
   "raw_scene_file": "C:\\VSCode\\Classes\\PIC16B\\robotic_prediction_comparison\\datasets\\univ\\test\\students003.txt",
-  "checkpoint_path": "C:\\VSCode\\Classes\\PIC16B\\robotic_prediction_comparison\\ssm\\univ\\v2\\lr_0.003_batch_512_epochs_50_best_model.pt",
+  "checkpoint_path": "C:\\VSCode\\Classes\\PIC16B\\robotic_prediction_comparison\\tcn\\univ\\checkpoints\\best_model.pt",
   "observe_len": 8,
   "predict_len": 12,
   "frame_step": 10,

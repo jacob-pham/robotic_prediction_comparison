@@ -4,6 +4,7 @@ SSM, and roll out an ego robot using the potential field controller.
 Run from project root:  python -m navigation.simulate_simple
 """
 from pathlib import Path
+import importlib.util
 import json
 import sys
 import numpy as np
@@ -14,12 +15,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "ssm"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from model import TrajectoryPredictor
 from controller import compute_velocity, at_goal, constant_velocity_predict
 
 SCENE_NAME = "univ"
 RAW_FILE = PROJECT_ROOT / "datasets" / SCENE_NAME / "test" / "students003.txt"
-CHECKPOINT_PATH = (PROJECT_ROOT / "ssm" / SCENE_NAME / "v2" / "lr_0.003_batch_512_epochs_50_best_model.pt")
+
+# pick which trajectory predictor the simulation uses
+MODEL_TYPE = "ssm"  # one of: "ssm", "lstm", "tcn"
+
+# each model lives in its own file but the class is always TrajectoryPredictor
+MODEL_FILES = {
+    "ssm": PROJECT_ROOT / "ssm" / "model.py",
+    "lstm": PROJECT_ROOT / "lstm" / "model.py",
+    "tcn": PROJECT_ROOT / "tcn" / "tcn_model.py",
+}
+
+# where each model's trained weights live; only SSM is trained so far
+CHECKPOINT_PATHS = {
+    "ssm": PROJECT_ROOT / "ssm" / SCENE_NAME / "v2" / "lr_0.003_batch_512_epochs_50_best_model.pt",
+    "lstm": PROJECT_ROOT / "lstm" / SCENE_NAME / "best_model.pt",
+    "tcn": PROJECT_ROOT / "tcn" / SCENE_NAME / "checkpoints" / "best_model.pt",
+}
 
 OBSERVE_LEN = 8      # observed frames fed to the model
 PREDICT_LEN = 12     # frames the model predicts
@@ -47,8 +63,26 @@ RANDOM_SEED = 0
 ANCHOR_FRAME = 1040  # densest frame in students003.txt (46 fully-observed peds)
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-RESULTS_FILE = RESULTS_DIR / "navigation_rollout_simple.npz"
-METADATA_FILE = RESULTS_DIR / "navigation_rollout_simple_metadata.json"
+RESULTS_FILE = RESULTS_DIR / f"navigation_rollout_simple_{MODEL_TYPE}.npz"
+METADATA_FILE = RESULTS_DIR / f"navigation_rollout_simple_{MODEL_TYPE}_metadata.json"
+
+
+def load_predictor_class(module_path):
+    """Load the TrajectoryPredictor class from a model file by path.
+
+    All three model files define a class named TrajectoryPredictor, and two of
+    them are both called model.py, so a plain import would collide. Loading each
+    file directly by path avoids that.
+
+    input:
+        module_path: path to the model .py file
+    output:
+        the TrajectoryPredictor class defined in that file
+    """
+    spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.TrajectoryPredictor
 
 
 def index_pedestrians(df):
@@ -97,7 +131,7 @@ def get_observed(ped_index, anchor, frame_step, observe_len):
     return observed
 
 
-def predict_pedestrians(model, observed, device):
+def ssm_predict(model, observed, device):
     """Run the SSM on all observed peds.
 
     The model takes step deltas and outputs step deltas. We cumsum the
@@ -143,6 +177,133 @@ def predict_pedestrians(model, observed, device):
         pid = ped_ids[i]
         result[pid] = predicted_abs[i]
     return result
+
+
+def lstm_features(data):
+    """Build the 8 input features the LSTM expects from raw positions.
+
+    This is a copy of add_elements from lstm/train.py. The features beyond x,y
+    (velocity, speed, acceleration, angle, angle change) are all delta based, so
+    centering the positions first does not change them.
+
+    input:
+        data: tensor (N, T, 2) positions
+    output:
+        tensor (N, T, 8) with position and motion features
+    """
+    N = data.shape[0]
+
+    vel = data[:, 1:, :] - data[:, :-1, :]
+    vel = torch.cat([torch.zeros(N, 1, 2), vel], dim=1)
+    speed = torch.norm(vel, dim=2, keepdim=True)
+
+    acc = speed[:, 1:, :] - speed[:, :-1, :]
+    acc = torch.cat([torch.zeros(N, 1, 1), acc], dim=1)
+
+    ang = torch.atan2(vel[:, :, 1:2], vel[:, :, 0:1])
+    ang_change = ang[:, 1:] - ang[:, :-1]
+    ang_change = torch.cat([torch.zeros(N, 1, 1), ang_change], dim=1)
+
+    return torch.cat([data, vel, speed, acc, ang, ang_change], dim=2)
+
+
+def lstm_predict(model, observed, device):
+    """Run the LSTM on all observed peds.
+
+    The LSTM was trained on agent-centric data (last observed frame at the
+    origin) and outputs absolute future positions in that centered frame. So we
+    center the history, build the motion features, run the model, then add the
+    last observed position back to get world coordinates.
+
+    input:
+        model: trained TrajectoryPredictor
+        observed: {ped_id: array(OBSERVE_LEN, 2)}
+        device: torch device
+    output:
+        {ped_id: array(PREDICT_LEN, 2)} absolute predicted positions
+    """
+    if not observed:
+        return {}
+
+    ped_ids = list(observed.keys())
+    history_list = []
+    for pid in ped_ids:
+        history_list.append(observed[pid])
+    histories = np.stack(history_list, axis=0)
+    histories_t = torch.from_numpy(histories).float()
+
+    last_pos = histories_t[:, OBSERVE_LEN - 1:OBSERVE_LEN, :]
+    centered = histories_t - last_pos
+    features = lstm_features(centered).to(device)
+
+    model.eval()
+    with torch.no_grad():
+        predicted_centered = model(features)
+
+    predicted_abs = predicted_centered + last_pos.to(device)
+    predicted_abs = predicted_abs.cpu().numpy()
+
+    result = {}
+    for i in range(len(ped_ids)):
+        pid = ped_ids[i]
+        result[pid] = predicted_abs[i]
+    return result
+
+
+def tcn_predict(model, observed, device):
+    """Run the TCN on all observed peds.
+
+    The TCN was trained on agent-centric absolute positions with the future 12
+    frames zeroed out, and outputs absolute positions in that centered frame. So
+    we center the history, zero the future slots, run the model, then add the
+    last observed position back to get world coordinates.
+
+    input:
+        model: trained TrajectoryPredictor
+        observed: {ped_id: array(OBSERVE_LEN, 2)}
+        device: torch device
+    output:
+        {ped_id: array(PREDICT_LEN, 2)} absolute predicted positions
+    """
+    if not observed:
+        return {}
+
+    ped_ids = list(observed.keys())
+    history_list = []
+    for pid in ped_ids:
+        history_list.append(observed[pid])
+    histories = np.stack(history_list, axis=0)
+    histories_t = torch.from_numpy(histories).float().to(device)
+
+    batch_size = histories_t.shape[0]
+    full_seq_len = OBSERVE_LEN + PREDICT_LEN
+
+    last_pos = histories_t[:, OBSERVE_LEN - 1:OBSERVE_LEN, :]
+    centered = histories_t - last_pos
+
+    model_input = torch.zeros(batch_size, full_seq_len, 2, device=device)
+    model_input[:, :OBSERVE_LEN, :] = centered
+
+    model.eval()
+    with torch.no_grad():
+        raw_output = model(model_input)
+
+    predicted_abs = raw_output[:, OBSERVE_LEN:, :] + last_pos
+    predicted_abs = predicted_abs.cpu().numpy()
+
+    result = {}
+    for i in range(len(ped_ids)):
+        pid = ped_ids[i]
+        result[pid] = predicted_abs[i]
+    return result
+
+
+# pick the predict function that matches MODEL_TYPE
+PREDICT_FUNCTIONS = {
+    "ssm": ssm_predict,
+    "lstm": lstm_predict,
+    "tcn": tcn_predict,
+}
 
 
 def get_partial_history(ped_index, pid, current_frame, frame_step, observe_len):
@@ -229,13 +390,14 @@ def build_pedestrian_positions(ped_index, ped_ids, anchor, frame_step, num_steps
     return positions, mask
 
 
-def simulate_ego(start, goal, model, device, ped_index, anchor):
+def simulate_ego(start, goal, model, predict_fn, device, ped_index, anchor):
     """Roll the ego forward, re-predicting pedestrian futures every step.
 
     input:
         start: (2,) ego start position
         goal: (2,) ego goal position
         model: trained TrajectoryPredictor
+        predict_fn: prediction function matching MODEL_TYPE
         device: torch device
         ped_index: {ped_id: {frame_id: pos}}
         anchor: anchor frame id (step 0)
@@ -256,7 +418,7 @@ def simulate_ego(start, goal, model, device, ped_index, anchor):
 
         current_frame = anchor + step * FRAME_STEP
         observed_now = get_observed(ped_index, current_frame, FRAME_STEP, OBSERVE_LEN)
-        predicted_now = predict_pedestrians(model, observed_now, device)
+        predicted_now = predict_fn(model, observed_now, device)
 
         # fallback: const-velocity for peds without a full 8-frame history
         for pid in ped_index:
@@ -329,13 +491,15 @@ def simulate_ego(start, goal, model, device, ped_index, anchor):
 
 
 def save_rollout(rollout, ped_positions, ped_mask, anchor,
-                 results_file, metadata_file):
+                 model_type, checkpoint_path, results_file, metadata_file):
     """Save rollout arrays as npz and run metadata as json.
 
     input:
         rollout: dict returned by simulate_ego
         ped_positions, ped_mask: arrays from build_pedestrian_positions
         anchor: anchor frame id
+        model_type: which predictor was used
+        checkpoint_path: path to the weights that were loaded
         results_file: output npz path
         metadata_file: output json path
     output:
@@ -356,8 +520,9 @@ def save_rollout(rollout, ped_positions, ped_mask, anchor,
 
     metadata = {
         "scene_name": SCENE_NAME,
+        "model_type": model_type,
         "raw_scene_file": str(RAW_FILE),
-        "checkpoint_path": str(CHECKPOINT_PATH),
+        "checkpoint_path": str(checkpoint_path),
         "observe_len": OBSERVE_LEN,
         "predict_len": PREDICT_LEN,
         "frame_step": FRAME_STEP,
@@ -395,9 +560,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    if not CHECKPOINT_PATH.exists():
-        print(f"ERROR: No trained checkpoint at {CHECKPOINT_PATH}")
-        print("Train the SSM model first:  cd ssm && python train.py")
+    model_type = MODEL_TYPE
+    checkpoint_path = CHECKPOINT_PATHS[model_type]
+    predict_fn = PREDICT_FUNCTIONS[model_type]
+    print(f"Model type: {model_type}")
+
+    if not checkpoint_path.exists():
+        print(f"ERROR: No trained {model_type} checkpoint at {checkpoint_path}")
+        print(f"Train the {model_type} model first and place its weights there.")
         sys.exit(1)
 
     df = pd.read_csv(RAW_FILE, sep="\t", header=None,
@@ -423,11 +593,12 @@ def main():
         print("No pedestrians available at this anchor. Try a different ANCHOR_FRAME.")
         sys.exit(1)
 
-    model = TrajectoryPredictor().to(device)
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
-    print(f"Loaded checkpoint from {CHECKPOINT_PATH.name}")
+    predictor_class = load_predictor_class(MODEL_FILES[model_type])
+    model = predictor_class().to(device)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    print(f"Loaded checkpoint from {checkpoint_path.name}")
 
-    rollout = simulate_ego(EGO_START, EGO_GOAL, model, device, ped_index, anchor)
+    rollout = simulate_ego(EGO_START, EGO_GOAL, model, predict_fn, device, ped_index, anchor)
     ego_path = rollout["ego_positions"]
     num_steps_done = rollout["ego_velocities"].shape[0]
     final_dist = float(np.linalg.norm(ego_path[-1] - EGO_GOAL))
@@ -463,7 +634,7 @@ def main():
     )
 
     save_rollout(rollout, ped_positions, ped_mask, anchor,
-                 RESULTS_FILE, METADATA_FILE)
+                 model_type, checkpoint_path, RESULTS_FILE, METADATA_FILE)
 
 
 if __name__ == "__main__":

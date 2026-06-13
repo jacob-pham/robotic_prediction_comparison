@@ -202,6 +202,7 @@ def main():
     model = TrajectoryPredictor().to(device)
     model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
     print(f"Loaded checkpoint from {CHECKPOINT_PATH}")
+    print(f"Number of model parameters: {sum(p.numel() for p in model.parameters())}")
 
     all_predictions, all_ground_truth = get_all_predictions(model, test_data, device)
 
