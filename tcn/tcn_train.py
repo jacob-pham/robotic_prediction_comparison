@@ -46,24 +46,6 @@ def build_model_input(trajectory_tensor):
     model_input[:, OBSERVE_LEN:, :] = 0.0   # blank out timesteps 8–19
     return model_input
 
-import torch
-import torch.nn as nn
-
-def compute_custom_loss(predictions, ground_truth, fde_weight=2.0):
-    """
-    Computes a hybrid loss combining MSE over the full path and a dedicated penalty for the Final Displacement Error (FDE).
-    """
-    predicted_future = predictions[:, OBSERVE_LEN:, :]
-    true_future = ground_truth[:, OBSERVE_LEN:, :]
-    
-    # Linearly increasing weights: later steps matter more
-    weights = torch.linspace(0.5, 1.5, PREDICT_LEN, device=predictions.device)
-    weighted_mse = ((predicted_future - true_future) ** 2 * weights[None, :, None]).mean()
-    
-    fde_loss = nn.functional.l1_loss(predicted_future[:, -1], true_future[:, -1])
-    return weighted_mse + fde_weight * fde_loss
-
-
 def run_one_epoch(model, data_loader, optimizer, is_training, device):
     if is_training:
         model.train()
