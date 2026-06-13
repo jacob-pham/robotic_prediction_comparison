@@ -6,9 +6,12 @@ from tqdm import tqdm
 
 from model import TrajectoryPredictor
 
-SCENE = 'zara2'
+SCENE = "univ"  # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
 
-DATA_DIR = Path(r"/Users/adelaidegray1/Desktop/PIC 16B/datasets_processed") / SCENE
+DATA_DIR = Path.cwd().parent / "datasets_processed" / SCENE
+print(f"Using processed data from: {DATA_DIR}")
+CHECKPOINT_DIR = Path.cwd() / SCENE
+SAVE_PATH = CHECKPOINT_DIR / "best_model.pt"
 
 OBSERVE_LEN = 8
 BATCH_SIZE = 64
@@ -136,7 +139,8 @@ def main():
         tqdm.write(f'Epoch {epoch+1}: train={train_loss:.4f}, val={val_loss:.4f}')
 
     # save learned weights to disk
-    torch.save(model.state_dict(), "model.pt")
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), SAVE_PATH)
 
 if __name__ == "__main__":
     main()

@@ -8,9 +8,12 @@ from torch.utils.data import DataLoader, TensorDataset
 from model import TrajectoryPredictor
 from train import add_elements
 
-SCENE = 'zara2'
+SCENE = "univ"  # scene to make test set, available scenes: "eth", "hotel", "univ", "zara1", "zara2"
 
-DATA_DIR = Path(r"/Users/adelaidegray1/Desktop/PIC 16B/datasets_processed") / SCENE
+DATA_DIR = Path.cwd().parent / "datasets_processed" / SCENE
+print(f"Using processed data from: {DATA_DIR}")
+CHECKPOINT_DIR = Path.cwd() / SCENE
+LOAD_PATH = CHECKPOINT_DIR / "best_model.pt"
 PREDICTIONS_PATH = Path.cwd() / "predictions.png"
 
 OBSERVE_LEN = 8
@@ -141,7 +144,8 @@ def main():
 
     # load model
     model = TrajectoryPredictor().to(device)
-    model.load_state_dict(torch.load('model.pt', map_location=device))
+    model.load_state_dict(torch.load(LOAD_PATH, map_location=device))
+    print(f"Number of model parameters: {sum(p.numel() for p in model.parameters())}")
 
     # get predictions
     all_preds, all_obs = get_all_predictions(model, test_loader, device)

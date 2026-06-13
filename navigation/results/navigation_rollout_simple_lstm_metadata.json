@@ -1,8 +1,8 @@
 {
   "scene_name": "univ",
-  "model_type": "ssm",
+  "model_type": "lstm",
   "raw_scene_file": "C:\\VSCode\\Classes\\PIC16B\\robotic_prediction_comparison\\datasets\\univ\\test\\students003.txt",
-  "checkpoint_path": "C:\\VSCode\\Classes\\PIC16B\\robotic_prediction_comparison\\ssm\\univ\\v2\\lr_0.003_batch_512_epochs_50_best_model.pt",
+  "checkpoint_path": "C:\\VSCode\\Classes\\PIC16B\\robotic_prediction_comparison\\lstm\\univ\\best_model.pt",
   "observe_len": 8,
   "predict_len": 12,
   "frame_step": 10,
@@ -16,8 +16,8 @@
   "goal_tolerance": 0.4,
   "max_sim_steps": 200,
   "anchor_frame": 1040,
-  "num_steps_done": 81,
-  "num_obstacle_pedestrians": 53,
+  "num_steps_done": 76,
+  "num_obstacle_pedestrians": 51,
   "reached_goal": true,
   "start": [
     0.0,
